@@ -37,15 +37,32 @@ aws iam create-policy \
     --policy-document file://iam_policy.json || echo "Policy already exists, continuing..."
 
 # Step 4: Create IAM role and service account
+# Get the IAM role ARN created by Terraform
+echo "🔍 Getting Load Balancer Controller IAM role from Terraform..."
+cd "$(dirname "$0")/../resources"
+LB_CONTROLLER_ROLE_ARN=$(terraform output -raw iam_roles | jq -r '.load_balancer_controller_role_arn')
+
+if [ -z "$LB_CONTROLLER_ROLE_ARN" ] || [ "$LB_CONTROLLER_ROLE_ARN" = "null" ]; then
+    echo "❌ Could not get Load Balancer Controller IAM role ARN from Terraform"
+    exit 1
+fi
+
+echo "✅ Using IAM role: $LB_CONTROLLER_ROLE_ARN"
+
+# Create service account with the Terraform-created IAM role
 echo "👤 Creating service account for AWS Load Balancer Controller..."
-eksctl create iamserviceaccount \
-  --cluster=$CLUSTER_NAME \
-  --namespace=kube-system \
-  --name=aws-load-balancer-controller \
-  --role-name AmazonEKSLoadBalancerControllerRole \
-  --attach-policy-arn=arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/AWSLoadBalancerControllerIAMPolicy \
-  --approve \
-  --region=$REGION || echo "Service account already exists, continuing..."
+kubectl apply -f - <<EOF
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/name: aws-load-balancer-controller
+  name: aws-load-balancer-controller
+  namespace: kube-system
+  annotations:
+    eks.amazonaws.com/role-arn: $LB_CONTROLLER_ROLE_ARN
+EOF
 
 # Step 5: Install AWS Load Balancer Controller using Helm
 echo "📦 Adding EKS Helm repository..."

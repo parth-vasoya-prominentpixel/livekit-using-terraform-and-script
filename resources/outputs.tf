@@ -136,3 +136,65 @@ output "deployment_summary" {
     environment     = var.env
   }
 }
+
+###############################
+# IAM Roles and EKS Addons Outputs
+###############################
+
+output "iam_roles" {
+  description = "IAM roles created for EKS services"
+  value = {
+    ebs_csi_driver_role_arn           = module.ebs_csi_irsa_role.iam_role_arn
+    load_balancer_controller_role_arn = module.load_balancer_controller_irsa_role.iam_role_arn
+    cluster_autoscaler_role_arn       = module.cluster_autoscaler_irsa_role.iam_role_arn
+  }
+}
+
+output "cluster_addons_status" {
+  description = "Status of EKS cluster addons"
+  value = {
+    for addon_name, addon in module.eks.cluster_addons : addon_name => {
+      addon_name    = addon.addon_name
+      addon_version = addon.addon_version
+      arn          = addon.arn
+    }
+  }
+}
+
+output "ebs_csi_driver_status" {
+  description = "Status of EBS CSI driver addon"
+  value = {
+    addon_name    = aws_eks_addon.ebs_csi_driver.addon_name
+    addon_version = aws_eks_addon.ebs_csi_driver.addon_version
+    status        = aws_eks_addon.ebs_csi_driver.status
+    service_account_role_arn = aws_eks_addon.ebs_csi_driver.service_account_role_arn
+  }
+}
+
+output "cluster_access_entries" {
+  description = "EKS cluster access entries configured"
+  value = {
+    deployment_role_arn = var.deployment_role_arn
+    current_caller_arn  = data.aws_caller_identity.current.arn
+    cluster_creator_permissions = true
+  }
+}
+
+output "node_group_status" {
+  description = "Status of EKS node groups"
+  value = {
+    for name, ng in module.eks.eks_managed_node_groups : name => {
+      node_group_arn = ng.node_group_arn
+      node_group_id  = ng.node_group_id
+    }
+  }
+}
+
+output "cluster_security_groups" {
+  description = "Security groups attached to the cluster"
+  value = {
+    cluster_security_group_id = module.eks.cluster_security_group_id
+    node_security_group_id    = module.eks.node_security_group_id
+    sip_security_group_id     = aws_security_group.sip_traffic.id
+  }
+}
