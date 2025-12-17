@@ -95,6 +95,19 @@ fi
 cd "$TERRAFORM_DIR"
 print_status "info" "Working directory: $(pwd)"
 
+# Determine environment and region first
+ENVIRONMENT=${ENVIRONMENT:-"dev"}
+REGION=${AWS_REGION:-"us-east-1"}
+
+# Construct file paths
+TFVARS_FILE="../environments/livekit-poc/${REGION}/${ENVIRONMENT}/inputs.tfvars"
+BACKEND_CONFIG_FILE="../environments/livekit-poc/${REGION}/${ENVIRONMENT}/backend.tfvars"
+
+print_status "info" "Using environment: $ENVIRONMENT"
+print_status "info" "Using region: $REGION"
+print_status "info" "Using tfvars file: $TFVARS_FILE"
+print_status "info" "Using backend config: $BACKEND_CONFIG_FILE"
+
 # Set environment variables
 export TF_IN_AUTOMATION=true
 export TF_INPUT=false
@@ -128,19 +141,6 @@ else
     print_status "error" "Terraform configuration validation failed"
     exit 1
 fi
-
-# Determine environment and region
-ENVIRONMENT=${ENVIRONMENT:-"dev"}
-REGION=${AWS_REGION:-"us-east-1"}
-
-# Construct file paths
-TFVARS_FILE="../environments/livekit-poc/${REGION}/${ENVIRONMENT}/inputs.tfvars"
-BACKEND_CONFIG_FILE="../environments/livekit-poc/${REGION}/${ENVIRONMENT}/backend.tfvars"
-
-print_status "info" "Using environment: $ENVIRONMENT"
-print_status "info" "Using region: $REGION"
-print_status "info" "Using tfvars file: $TFVARS_FILE"
-print_status "info" "Using backend config: $BACKEND_CONFIG_FILE"
 
 if [ ! -f "$TFVARS_FILE" ]; then
     print_status "error" "Terraform variables file not found: $TFVARS_FILE"
