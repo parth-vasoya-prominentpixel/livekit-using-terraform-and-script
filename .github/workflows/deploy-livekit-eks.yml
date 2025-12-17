@@ -28,7 +28,7 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  TERRAFORM_VERSION: 1.14.2
+  TERRAFORM_VERSION: 1.6.0
   KUBECTL_VERSION: v1.28.0
   HELM_VERSION: v3.13.0
   EKSCTL_VERSION: 0.165.0
@@ -121,8 +121,16 @@ jobs:
         id: terraform-plan
         working-directory: ./livekit-poc-infra/resources
         run: |
-          echo "🔧 Initializing Terraform..."
-          terraform init -upgrade
+          echo "🔧 Initializing Terraform with S3 backend..."
+          BACKEND_CONFIG="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/backend.tfvars"
+          
+          if [ -f "$BACKEND_CONFIG" ]; then
+            echo "📦 Using S3 backend configuration: $BACKEND_CONFIG"
+            terraform init -upgrade -backend-config="$BACKEND_CONFIG"
+          else
+            echo "⚠️ Backend config not found, using local state"
+            terraform init -upgrade
+          fi
           
           echo "🔍 Validating Terraform configuration..."
           terraform validate

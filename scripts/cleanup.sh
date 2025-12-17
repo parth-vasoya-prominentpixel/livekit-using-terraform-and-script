@@ -41,8 +41,21 @@ eksctl delete iamserviceaccount \
 echo "🗑️  Destroying Terraform infrastructure..."
 cd "$SCRIPT_DIR/../resources"
 
+# Initialize Terraform with backend config
+ENVIRONMENT=${ENVIRONMENT:-"dev"}
+REGION=${AWS_REGION:-"us-east-1"}
+BACKEND_CONFIG_FILE="../environments/livekit-poc/$REGION/$ENVIRONMENT/backend.tfvars"
+
+if [ -f "$BACKEND_CONFIG_FILE" ]; then
+    echo "📦 Initializing with S3 backend: $BACKEND_CONFIG_FILE"
+    terraform init -backend-config="$BACKEND_CONFIG_FILE"
+else
+    echo "⚠️ Backend config not found, using local state"
+    terraform init
+fi
+
 # Add deployment role ARN if provided
-TERRAFORM_VARS="-var-file=../environments/livekit-poc/us-east-1/dev/inputs.tfvars"
+TERRAFORM_VARS="-var-file=../environments/livekit-poc/$REGION/$ENVIRONMENT/inputs.tfvars"
 if [ -n "$DEPLOYMENT_ROLE_ARN" ]; then
     echo "🔐 Using deployment role: $DEPLOYMENT_ROLE_ARN"
     TERRAFORM_VARS="$TERRAFORM_VARS -var=deployment_role_arn=$DEPLOYMENT_ROLE_ARN"
