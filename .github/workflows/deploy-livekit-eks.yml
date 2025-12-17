@@ -70,11 +70,11 @@ jobs:
 
       - name: Run Prerequisites Script
         id: run-script
-        working-directory: ./
+        working-directory: ./livekit-poc-infra
         run: |
           echo "🔍 Running prerequisites check script..."
-          chmod +x ./livekit-poc-infra/scripts/00-prerequisites.sh
-          ./livekit-poc-infra/scripts/00-prerequisites.sh
+          chmod +x ./scripts/00-prerequisites.sh
+          ./scripts/00-prerequisites.sh
           echo "status=success" >> $GITHUB_OUTPUT
           echo "✅ Prerequisites check completed successfully!"
 
