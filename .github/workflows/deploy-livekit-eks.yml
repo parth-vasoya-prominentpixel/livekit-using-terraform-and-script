@@ -28,10 +28,10 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  TERRAFORM_VERSION: 1.6.0
-  KUBECTL_VERSION: v1.28.0
-  HELM_VERSION: v3.13.0
-  EKSCTL_VERSION: 0.165.0
+  TERRAFORM_VERSION: 1.10.3
+  KUBECTL_VERSION: v1.32.0
+  HELM_VERSION: v3.16.3
+  EKSCTL_VERSION: 0.197.0
 
 # OIDC permissions for AWS authentication
 permissions:
@@ -70,10 +70,10 @@ jobs:
 
       - name: Run Prerequisites Script
         id: run-script
-        working-directory: ./livekit-poc-infra
+        working-directory: livekit-poc-infra
         run: |
           echo "🔍 Running prerequisites check script..."
-          chmod +x ./scripts/00-prerequisites.sh
+          chmod +x scripts/00-prerequisites.sh
           ./scripts/00-prerequisites.sh
           echo "status=success" >> $GITHUB_OUTPUT
           echo "✅ Prerequisites check completed successfully!"
@@ -119,7 +119,7 @@ jobs:
 
       - name: Terraform Init and Plan
         id: terraform-plan
-        working-directory: ./livekit-poc-infra/resources
+        working-directory: livekit-poc-infra/resources
         run: |
           echo "🔧 Initializing Terraform with S3 backend..."
           BACKEND_CONFIG="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/backend.tfvars"
@@ -148,7 +148,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: terraform-plan-${{ inputs.environment }}-${{ github.run_id }}
-          path: ./livekit-poc-infra/resources/tfplan
+          path: livekit-poc-infra/resources/tfplan
           retention-days: 5
 
   # Step 3: Terraform Apply (Infrastructure Deployment)
@@ -202,14 +202,14 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: terraform-plan-${{ inputs.environment }}-${{ github.run_id }}
-          path: ./livekit-poc-infra/resources/
+          path: livekit-poc-infra/resources/
 
       - name: Run Infrastructure Deployment Script
         id: run-script
-        working-directory: ./livekit-poc-infra
+        working-directory: livekit-poc-infra
         run: |
           echo "🚀 Running infrastructure deployment script..."
-          chmod +x ./scripts/01-deploy-infrastructure.sh
+          chmod +x scripts/01-deploy-infrastructure.sh
           
           # Set environment variables for the script
           export ENVIRONMENT="${{ inputs.environment }}"
@@ -226,7 +226,7 @@ jobs:
 
       - name: Get Terraform Outputs
         id: get-outputs
-        working-directory: ./livekit-poc-infra/resources
+        working-directory: livekit-poc-infra/resources
         run: |
           echo "📊 Getting Terraform outputs..."
           
@@ -302,10 +302,10 @@ jobs:
 
       - name: Run Load Balancer Setup Script
         id: run-script
-        working-directory: ./livekit-poc-infra
+        working-directory: livekit-poc-infra
         run: |
           echo "⚖️ Running Load Balancer Controller setup script..."
-          chmod +x ./scripts/02-setup-load-balancer.sh
+          chmod +x scripts/02-setup-load-balancer.sh
           
           # Set environment variables for the script
           export CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
@@ -383,10 +383,10 @@ jobs:
 
       - name: Run LiveKit Deployment Script
         id: run-script
-        working-directory: ./livekit-poc-infra
+        working-directory: livekit-poc-infra
         run: |
           echo "🎥 Running LiveKit deployment script..."
-          chmod +x ./scripts/03-deploy-livekit.sh
+          chmod +x scripts/03-deploy-livekit.sh
           
           # Set environment variables for the script
           export REDIS_ENDPOINT="${{ needs.terraform-apply.outputs.redis-endpoint }}"
@@ -462,10 +462,10 @@ jobs:
 
       - name: Run Cleanup Script
         id: run-script
-        working-directory: ./livekit-poc-infra
+        working-directory: livekit-poc-infra
         run: |
           echo "🗑️ Running cleanup script..."
-          chmod +x ./scripts/cleanup.sh
+          chmod +x scripts/cleanup.sh
           
           # Set environment variables for the script
           export ENVIRONMENT="${{ inputs.environment }}"

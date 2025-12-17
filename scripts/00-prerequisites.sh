@@ -114,20 +114,20 @@ case $OS in
         install_if_missing "aws" "curl 'https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip' -o 'awscliv2.zip' && unzip -q awscliv2.zip && sudo ./aws/install && rm -rf aws awscliv2.zip" "aws --version"
         
         # Install Terraform
-        TERRAFORM_VERSION="1.6.0"
+        TERRAFORM_VERSION="1.10.3"
         install_if_missing "terraform" "wget -q https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip && unzip -q terraform_${TERRAFORM_VERSION}_linux_amd64.zip && sudo mv terraform /usr/local/bin/ && rm terraform_${TERRAFORM_VERSION}_linux_amd64.zip" "terraform version"
         
         # Install kubectl
-        KUBECTL_VERSION="v1.28.0"
+        KUBECTL_VERSION="v1.32.0"
         install_if_missing "kubectl" "curl -LO 'https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl' && sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && rm kubectl" "kubectl version --client"
         
         # Install Helm
-        HELM_VERSION="v3.13.0"
+        HELM_VERSION="v3.16.3"
         install_if_missing "helm" "curl -fsSL https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz | tar -xz && sudo mv linux-amd64/helm /usr/local/bin/ && rm -rf linux-amd64" "helm version"
         
         # Install eksctl
-        EKSCTL_VERSION="0.165.0"
-        install_if_missing "eksctl" "curl -sLO 'https://github.com/eksctl-io/eksctl/releases/download/${EKSCTL_VERSION}/eksctl_Linux_amd64.tar.gz' && tar -xzf eksctl_Linux_amd64.tar.gz && sudo mv eksctl /usr/local/bin/ && rm eksctl_Linux_amd64.tar.gz" "eksctl version"
+        EKSCTL_VERSION="0.197.0"
+        install_if_missing "eksctl" "curl -sLO 'https://github.com/eksctl-io/eksctl/releases/download/v${EKSCTL_VERSION}/eksctl_Linux_amd64.tar.gz' && tar -xzf eksctl_Linux_amd64.tar.gz && sudo mv eksctl /usr/local/bin/ && rm eksctl_Linux_amd64.tar.gz" "eksctl version"
         ;;
         
     "macos")
