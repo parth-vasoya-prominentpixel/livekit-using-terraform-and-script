@@ -105,6 +105,9 @@ BACKEND_CONFIG_FILE="../environments/livekit-poc/$REGION/$ENVIRONMENT/backend.tf
 
 if [ -f "$BACKEND_CONFIG_FILE" ]; then
     print_status "info" "Using S3 backend configuration: $BACKEND_CONFIG_FILE"
+    print_status "info" "Backend config contents:"
+    cat "$BACKEND_CONFIG_FILE"
+    
     if retry_command 3 5 "terraform init -upgrade -backend-config=$BACKEND_CONFIG_FILE"; then
         print_status "success" "Terraform initialized successfully with S3 backend"
     else
@@ -112,13 +115,10 @@ if [ -f "$BACKEND_CONFIG_FILE" ]; then
         exit 1
     fi
 else
-    print_status "warning" "Backend config file not found, using local state"
-    if retry_command 3 5 "terraform init -upgrade"; then
-        print_status "success" "Terraform initialized successfully with local state"
-    else
-        print_status "error" "Failed to initialize Terraform"
-        exit 1
-    fi
+    print_status "error" "Backend config file not found: $BACKEND_CONFIG_FILE"
+    print_status "info" "Available files in environments directory:"
+    find ../environments -name "*.tfvars" -type f 2>/dev/null || echo "No tfvars files found"
+    exit 1
 fi
 
 # Validate Terraform configuration

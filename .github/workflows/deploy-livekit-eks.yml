@@ -138,10 +138,14 @@ jobs:
           
           if [ -f "$BACKEND_CONFIG" ]; then
             echo "📦 Using S3 backend configuration: $BACKEND_CONFIG"
+            echo "📋 Backend config contents:"
+            cat "$BACKEND_CONFIG"
             terraform init -upgrade -backend-config="$BACKEND_CONFIG"
           else
-            echo "⚠️ Backend config not found, using local state"
-            terraform init -upgrade
+            echo "❌ Backend config not found at: $BACKEND_CONFIG"
+            echo "📁 Available files in environments directory:"
+            find ../environments -name "*.tfvars" -type f
+            exit 1
           fi
           
           echo "🔍 Validating Terraform configuration..."
@@ -215,6 +219,20 @@ jobs:
         with:
           name: terraform-plan-${{ inputs.environment }}-${{ github.run_id }}
           path: resources/
+
+      - name: Initialize Terraform for Apply
+        working-directory: resources
+        run: |
+          echo "🔧 Re-initializing Terraform for apply step..."
+          BACKEND_CONFIG="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/backend.tfvars"
+          
+          if [ -f "$BACKEND_CONFIG" ]; then
+            echo "📦 Using S3 backend configuration: $BACKEND_CONFIG"
+            terraform init -backend-config="$BACKEND_CONFIG"
+          else
+            echo "❌ Backend config not found at: $BACKEND_CONFIG"
+            exit 1
+          fi
 
       - name: Run Infrastructure Deployment Script
         id: run-script
@@ -468,6 +486,20 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Initialize Terraform for Destroy
+        working-directory: resources
+        run: |
+          echo "🔧 Initializing Terraform for destroy..."
+          BACKEND_CONFIG="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/backend.tfvars"
+          
+          if [ -f "$BACKEND_CONFIG" ]; then
+            echo "📦 Using S3 backend configuration: $BACKEND_CONFIG"
+            terraform init -backend-config="$BACKEND_CONFIG"
+          else
+            echo "❌ Backend config not found at: $BACKEND_CONFIG"
+            exit 1
+          fi
 
       - name: Run Cleanup Script
         id: run-script

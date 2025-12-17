@@ -48,10 +48,14 @@ BACKEND_CONFIG_FILE="../environments/livekit-poc/$REGION/$ENVIRONMENT/backend.tf
 
 if [ -f "$BACKEND_CONFIG_FILE" ]; then
     echo "📦 Initializing with S3 backend: $BACKEND_CONFIG_FILE"
+    echo "📋 Backend config contents:"
+    cat "$BACKEND_CONFIG_FILE"
     terraform init -backend-config="$BACKEND_CONFIG_FILE"
 else
-    echo "⚠️ Backend config not found, using local state"
-    terraform init
+    echo "❌ Backend config not found: $BACKEND_CONFIG_FILE"
+    echo "📁 Available files:"
+    find ../environments -name "*.tfvars" -type f 2>/dev/null || echo "No tfvars files found"
+    exit 1
 fi
 
 # Add deployment role ARN if provided
