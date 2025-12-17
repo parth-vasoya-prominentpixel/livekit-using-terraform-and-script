@@ -38,4 +38,4 @@ twilio_cidrs = [
 ]
 
 # Deployment role ARN - Replace with your actual deployment role ARN
-deployment_role_arn = "arn:aws:iam::YOUR_ACCOUNT_ID:role/YOUR_DEPLOYMENT_ROLE_NAME"
+deployment_role_arn = "arn:aws:iam::918595516608:role/lp-iam-resource-creation-role"
