@@ -101,7 +101,6 @@ export TF_INPUT=false
 
 # Initialize Terraform with S3 backend
 print_status "info" "🔧 Initializing Terraform with S3 backend..."
-BACKEND_CONFIG_FILE="../environments/livekit-poc/$REGION/$ENVIRONMENT/backend.tfvars"
 
 if [ -f "$BACKEND_CONFIG_FILE" ]; then
     print_status "info" "Using S3 backend configuration: $BACKEND_CONFIG_FILE"
@@ -133,16 +132,22 @@ fi
 # Determine environment and region
 ENVIRONMENT=${ENVIRONMENT:-"dev"}
 REGION=${AWS_REGION:-"us-east-1"}
-TFVARS_FILE="../environments/livekit-poc/$REGION/$ENVIRONMENT/inputs.tfvars"
 
-if [ ! -f "$TFVARS_FILE" ]; then
-    print_status "error" "Terraform variables file not found: $TFVARS_FILE"
-    exit 1
-fi
+# Construct file paths
+TFVARS_FILE="../environments/livekit-poc/${REGION}/${ENVIRONMENT}/inputs.tfvars"
+BACKEND_CONFIG_FILE="../environments/livekit-poc/${REGION}/${ENVIRONMENT}/backend.tfvars"
 
 print_status "info" "Using environment: $ENVIRONMENT"
 print_status "info" "Using region: $REGION"
 print_status "info" "Using tfvars file: $TFVARS_FILE"
+print_status "info" "Using backend config: $BACKEND_CONFIG_FILE"
+
+if [ ! -f "$TFVARS_FILE" ]; then
+    print_status "error" "Terraform variables file not found: $TFVARS_FILE"
+    print_status "info" "Available files in environments directory:"
+    find ../environments -name "*.tfvars" -type f 2>/dev/null || echo "No tfvars files found"
+    exit 1
+fi
 
 # Create Terraform plan
 print_status "info" "📋 Creating Terraform plan..."

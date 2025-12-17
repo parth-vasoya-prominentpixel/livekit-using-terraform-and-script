@@ -44,7 +44,12 @@ cd "$SCRIPT_DIR/../resources"
 # Initialize Terraform with backend config
 ENVIRONMENT=${ENVIRONMENT:-"dev"}
 REGION=${AWS_REGION:-"us-east-1"}
-BACKEND_CONFIG_FILE="../environments/livekit-poc/$REGION/$ENVIRONMENT/backend.tfvars"
+BACKEND_CONFIG_FILE="../environments/livekit-poc/${REGION}/${ENVIRONMENT}/backend.tfvars"
+
+echo "🔧 Configuration:"
+echo "   Environment: $ENVIRONMENT"
+echo "   Region: $REGION"
+echo "   Backend config: $BACKEND_CONFIG_FILE"
 
 if [ -f "$BACKEND_CONFIG_FILE" ]; then
     echo "📦 Initializing with S3 backend: $BACKEND_CONFIG_FILE"
@@ -59,7 +64,7 @@ else
 fi
 
 # Add deployment role ARN if provided
-TERRAFORM_VARS="-var-file=../environments/livekit-poc/$REGION/$ENVIRONMENT/inputs.tfvars"
+TERRAFORM_VARS="-var-file=../environments/livekit-poc/${REGION}/${ENVIRONMENT}/inputs.tfvars"
 if [ -n "$DEPLOYMENT_ROLE_ARN" ]; then
     echo "🔐 Using deployment role: $DEPLOYMENT_ROLE_ARN"
     TERRAFORM_VARS="$TERRAFORM_VARS -var=deployment_role_arn=$DEPLOYMENT_ROLE_ARN"

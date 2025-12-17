@@ -337,6 +337,7 @@ jobs:
           
           # Set environment variables for the script
           export CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
+          export AWS_REGION="${{ env.AWS_REGION }}"
           export REGION="${{ env.AWS_REGION }}"
           export VPC_ID="${{ needs.terraform-apply.outputs.vpc-id }}"
           
