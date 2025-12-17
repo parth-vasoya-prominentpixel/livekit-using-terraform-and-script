@@ -10,7 +10,7 @@ public_subnets  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
 
 # EKS Configuration
 cluster_name    = "livekit"
-cluster_version = "1.31"
+cluster_version = "1.34"
 
 # Node Group Configuration
 node_groups = {
@@ -18,7 +18,7 @@ node_groups = {
     instance_types = ["t3.medium"]
     min_size       = 1
     max_size       = 10
-    desired_size   = 2
+    desired_size   = 3
   }
 }
 
