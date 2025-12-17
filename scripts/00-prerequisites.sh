@@ -114,7 +114,7 @@ case $OS in
         install_if_missing "aws" "curl 'https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip' -o 'awscliv2.zip' && unzip -q awscliv2.zip && sudo ./aws/install && rm -rf aws awscliv2.zip" "aws --version"
         
         # Install Terraform
-        TERRAFORM_VERSION="1.10.3"
+        TERRAFORM_VERSION="1.14.2"
         install_if_missing "terraform" "wget -q https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip && unzip -q terraform_${TERRAFORM_VERSION}_linux_amd64.zip && sudo mv terraform /usr/local/bin/ && rm terraform_${TERRAFORM_VERSION}_linux_amd64.zip" "terraform version"
         
         # Install kubectl
@@ -122,7 +122,7 @@ case $OS in
         install_if_missing "kubectl" "curl -LO 'https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl' && sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && rm kubectl" "kubectl version --client"
         
         # Install Helm
-        HELM_VERSION="v3.16.3"
+        HELM_VERSION="v3.19.2"
         install_if_missing "helm" "curl -fsSL https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz | tar -xz && sudo mv linux-amd64/helm /usr/local/bin/ && rm -rf linux-amd64" "helm version"
         
         # Install eksctl
@@ -183,14 +183,18 @@ if [ ${#MISSING_TOOLS[@]} -ne 0 ]; then
     exit 1
 fi
 
-# Check AWS credentials
-print_status "info" "Checking AWS credentials..."
-if retry_command 3 2 "aws sts get-caller-identity >/dev/null 2>&1"; then
-    print_status "success" "AWS credentials are configured"
-    aws sts get-caller-identity
+# Check AWS credentials (skip in CI/CD environments)
+if [ -z "$CI" ] && [ -z "$GITHUB_ACTIONS" ]; then
+    print_status "info" "Checking AWS credentials..."
+    if retry_command 3 2 "aws sts get-caller-identity >/dev/null 2>&1"; then
+        print_status "success" "AWS credentials are configured"
+        aws sts get-caller-identity
+    else
+        print_status "error" "AWS credentials are not configured. Please run 'aws configure'"
+        exit 1
+    fi
 else
-    print_status "error" "AWS credentials are not configured. Please run 'aws configure'"
-    exit 1
+    print_status "info" "Running in CI/CD environment - AWS credentials will be configured via OIDC"
 fi
 
 print_status "success" "All prerequisites are met!"

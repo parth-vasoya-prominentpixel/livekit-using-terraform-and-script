@@ -28,9 +28,9 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  TERRAFORM_VERSION: 1.10.3
+  TERRAFORM_VERSION: 1.14.2
   KUBECTL_VERSION: v1.32.0
-  HELM_VERSION: v3.16.3
+  HELM_VERSION: v3.19.2
   EKSCTL_VERSION: 0.197.0
 
 # OIDC permissions for AWS authentication
@@ -68,6 +68,13 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          role-session-name: GitHubActions-LiveKit-Prerequisites-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
       - name: Run Prerequisites Script
         id: run-script
         run: |
@@ -76,6 +83,12 @@ jobs:
           ./scripts/00-prerequisites.sh
           echo "status=success" >> $GITHUB_OUTPUT
           echo "✅ Prerequisites check completed successfully!"
+
+      - name: Verify AWS Credentials
+        run: |
+          echo "🔍 Verifying AWS OIDC credentials..."
+          aws sts get-caller-identity
+          echo "✅ AWS credentials configured successfully via OIDC!"
 
   # Step 2: Terraform Plan
   terraform-plan:
