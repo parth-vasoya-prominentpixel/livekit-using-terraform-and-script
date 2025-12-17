@@ -1,0 +1,584 @@
+name: LiveKit EKS Manual Deployment Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - uat
+          - prod
+      step:
+        description: 'Deployment step to execute'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - prerequisites
+          - terraform-plan
+          - terraform-apply
+          - load-balancer
+          - livekit
+          - destroy
+
+env:
+  AWS_REGION: us-east-1
+  TERRAFORM_VERSION: 1.14.2
+  KUBECTL_VERSION: v1.28.0
+  HELM_VERSION: v3.13.0
+  EKSCTL_VERSION: 0.165.0
+
+# OIDC permissions for AWS authentication
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  # Step 1: Prerequisites Check and Installation
+  prerequisites:
+    name: 🔍 Step 1 - Prerequisites Check
+    runs-on: ubuntu-latest
+    if: ${{ inputs.step == 'all' || inputs.step == 'prerequisites' }}
+    environment: 
+      name: ${{ inputs.environment }}-prerequisites
+      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    outputs:
+      tools-status: ${{ steps.run-script.outputs.status }}
+    
+    steps:
+      - name: 📋 Manual Approval - Prerequisites Check
+        run: |
+          echo "🤔 Manual approval required for Prerequisites Check"
+          echo "📋 This step will check and install required tools:"
+          echo "   - AWS CLI v2"
+          echo "   - Terraform ${{ env.TERRAFORM_VERSION }}"
+          echo "   - kubectl ${{ env.KUBECTL_VERSION }}"
+          echo "   - Helm ${{ env.HELM_VERSION }}"
+          echo "   - eksctl ${{ env.EKSCTL_VERSION }}"
+          echo "   - jq"
+          echo "🌍 Environment: ${{ inputs.environment }}"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Prerequisites Script
+        id: run-script
+        working-directory: ./
+        run: |
+          echo "🔍 Running prerequisites check script..."
+          chmod +x ./livekit-poc-infra/scripts/00-prerequisites.sh
+          ./livekit-poc-infra/scripts/00-prerequisites.sh
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "✅ Prerequisites check completed successfully!"
+
+  # Step 2: Terraform Plan
+  terraform-plan:
+    name: 📋 Step 2 - Terraform Plan
+    runs-on: ubuntu-latest
+    needs: [prerequisites]
+    if: ${{ always() && (needs.prerequisites.result == 'success' || inputs.step == 'terraform-plan') }}
+    environment: 
+      name: ${{ inputs.environment }}-terraform-plan
+      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    outputs:
+      plan-status: ${{ steps.terraform-plan.outputs.status }}
+    
+    steps:
+      - name: 📋 Manual Approval - Terraform Plan
+        run: |
+          echo "🤔 Manual approval required for Terraform Plan"
+          echo "📋 This step will create Terraform execution plan for:"
+          echo "   - EKS Cluster with node groups"
+          echo "   - VPC with public/private subnets"
+          echo "   - ElastiCache Redis cluster"
+          echo "   - Security groups (SIP port 5060 restricted to Twilio)"
+          echo "🌍 Environment: ${{ inputs.environment }}"
+          echo "📁 Working Directory: resources/"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          role-session-name: GitHubActions-LiveKit-Plan-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Terraform Init and Plan
+        id: terraform-plan
+        working-directory: ./livekit-poc-infra/resources
+        run: |
+          echo "🔧 Initializing Terraform..."
+          terraform init -upgrade
+          
+          echo "🔍 Validating Terraform configuration..."
+          terraform validate
+          
+          echo "📋 Creating Terraform plan..."
+          terraform plan \
+            -var-file="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars" \
+            -var="deployment_role_arn=${{ secrets.DEPLOYMENT_ROLE_ARN }}" \
+            -out=tfplan -detailed-exitcode
+          
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "✅ Terraform plan created successfully!"
+
+      - name: Upload Terraform Plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ inputs.environment }}-${{ github.run_id }}
+          path: ./livekit-poc-infra/resources/tfplan
+          retention-days: 5
+
+  # Step 3: Terraform Apply (Infrastructure Deployment)
+  terraform-apply:
+    name: 🚀 Step 3 - Deploy Infrastructure
+    runs-on: ubuntu-latest
+    needs: [terraform-plan]
+    if: ${{ always() && (needs.terraform-plan.result == 'success' || inputs.step == 'terraform-apply') && inputs.step != 'destroy' }}
+    environment: 
+      name: ${{ inputs.environment }}-terraform-apply
+      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    outputs:
+      apply-status: ${{ steps.run-script.outputs.status }}
+      cluster-name: ${{ steps.get-outputs.outputs.cluster_name }}
+      redis-endpoint: ${{ steps.get-outputs.outputs.redis_endpoint }}
+      vpc-id: ${{ steps.get-outputs.outputs.vpc_id }}
+    
+    steps:
+      - name: 📋 Manual Approval - Infrastructure Deployment
+        run: |
+          echo "🤔 Manual approval required for Infrastructure Deployment"
+          echo "⚠️  WARNING: This will create AWS resources that may incur costs!"
+          echo "📋 Resources to be created:"
+          echo "   - EKS Cluster: lp-eks-livekit-use1-${{ inputs.environment }}"
+          echo "   - VPC: lp-vpc-main-use1-${{ inputs.environment }}"
+          echo "   - ElastiCache Redis: lp-ec-redis-use1-${{ inputs.environment }}"
+          echo "   - Security Groups with SIP restrictions"
+          echo "   - NAT Gateways (3x ~$45/month each)"
+          echo "   - EKS Cluster (~$72/month)"
+          echo "   - ElastiCache Redis (~$15/month)"
+          echo "🌍 Environment: ${{ inputs.environment }}"
+          echo "📁 Working Directory: resources/"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          role-session-name: GitHubActions-LiveKit-Apply-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Download Terraform Plan
+        if: ${{ needs.terraform-plan.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-${{ inputs.environment }}-${{ github.run_id }}
+          path: ./livekit-poc-infra/resources/
+
+      - name: Run Infrastructure Deployment Script
+        id: run-script
+        working-directory: ./livekit-poc-infra
+        run: |
+          echo "🚀 Running infrastructure deployment script..."
+          chmod +x ./scripts/01-deploy-infrastructure.sh
+          
+          # Set environment variables for the script
+          export ENVIRONMENT="${{ inputs.environment }}"
+          export AWS_REGION="${{ env.AWS_REGION }}"
+          export TF_AUTO_APPROVE=true
+          export CI=true
+          export DEPLOYMENT_ROLE_ARN="${{ secrets.DEPLOYMENT_ROLE_ARN }}"
+          
+          # Run the deployment script
+          ./scripts/01-deploy-infrastructure.sh
+          
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "✅ Infrastructure deployment completed successfully!"
+
+      - name: Get Terraform Outputs
+        id: get-outputs
+        working-directory: ./livekit-poc-infra/resources
+        run: |
+          echo "📊 Getting Terraform outputs..."
+          
+          CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "")
+          REDIS_ENDPOINT=$(terraform output -raw redis_cluster_endpoint 2>/dev/null || echo "")
+          VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
+          
+          echo "cluster_name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
+          echo "redis_endpoint=$REDIS_ENDPOINT" >> $GITHUB_OUTPUT
+          echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
+          
+          echo "🏷️ Cluster Name: $CLUSTER_NAME"
+          echo "🔗 Redis Endpoint: $REDIS_ENDPOINT"
+          echo "🏠 VPC ID: $VPC_ID"
+
+  # Step 4: Load Balancer Controller Setup
+  setup-load-balancer:
+    name: ⚖️ Step 4 - Setup Load Balancer Controller
+    runs-on: ubuntu-latest
+    needs: [terraform-apply]
+    if: ${{ always() && (needs.terraform-apply.result == 'success' || inputs.step == 'load-balancer') }}
+    environment: 
+      name: ${{ inputs.environment }}-load-balancer
+      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    outputs:
+      lb-status: ${{ steps.run-script.outputs.status }}
+    
+    steps:
+      - name: 📋 Manual Approval - Load Balancer Controller
+        run: |
+          echo "🤔 Manual approval required for Load Balancer Controller Setup"
+          echo "📋 This step will install:"
+          echo "   - IAM OIDC identity provider for EKS cluster"
+          echo "   - IAM service account for AWS Load Balancer Controller"
+          echo "   - AWS Load Balancer Controller via Helm"
+          echo "   - Required IAM policies and roles"
+          echo "🌍 Environment: ${{ inputs.environment }}"
+          echo "🏷️ Cluster: ${{ needs.terraform-apply.outputs.cluster-name }}"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          role-session-name: GitHubActions-LiveKit-LB-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Install eksctl
+        run: |
+          curl -sLO "https://github.com/eksctl-io/eksctl/releases/download/${{ env.EKSCTL_VERSION }}/eksctl_Linux_amd64.tar.gz"
+          tar -xzf eksctl_Linux_amd64.tar.gz
+          sudo mv eksctl /usr/local/bin/
+          eksctl version
+
+      - name: Configure kubectl
+        run: |
+          echo "🔧 Configuring kubectl..."
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ needs.terraform-apply.outputs.cluster-name }}
+          kubectl get nodes
+          kubectl cluster-info
+
+      - name: Run Load Balancer Setup Script
+        id: run-script
+        working-directory: ./livekit-poc-infra
+        run: |
+          echo "⚖️ Running Load Balancer Controller setup script..."
+          chmod +x ./scripts/02-setup-load-balancer.sh
+          
+          # Set environment variables for the script
+          export CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
+          export REGION="${{ env.AWS_REGION }}"
+          export VPC_ID="${{ needs.terraform-apply.outputs.vpc-id }}"
+          
+          # Run the load balancer setup script
+          ./scripts/02-setup-load-balancer.sh
+          
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "✅ Load Balancer Controller setup completed successfully!"
+
+      - name: Verify Load Balancer Controller
+        run: |
+          echo "🔍 Verifying Load Balancer Controller installation..."
+          kubectl get deployment -n kube-system aws-load-balancer-controller
+          kubectl describe deployment -n kube-system aws-load-balancer-controller
+          
+          # Wait for deployment to be ready
+          kubectl wait --for=condition=available --timeout=300s deployment/aws-load-balancer-controller -n kube-system
+          
+          echo "✅ Load Balancer Controller is ready!"
+
+  # Step 5: LiveKit Deployment
+  deploy-livekit:
+    name: 🎥 Step 5 - Deploy LiveKit
+    runs-on: ubuntu-latest
+    needs: [terraform-apply, setup-load-balancer]
+    if: ${{ always() && (needs.setup-load-balancer.result == 'success' || inputs.step == 'livekit') }}
+    environment: 
+      name: ${{ inputs.environment }}-livekit
+      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    outputs:
+      livekit-status: ${{ steps.run-script.outputs.status }}
+    
+    steps:
+      - name: 📋 Manual Approval - LiveKit Deployment
+        run: |
+          echo "🤔 Manual approval required for LiveKit Deployment"
+          echo "📋 This step will deploy:"
+          echo "   - LiveKit namespace"
+          echo "   - LiveKit server with Redis integration"
+          echo "   - ALB ingress with SSL certificate"
+          echo "   - TURN server configuration"
+          echo "🌍 Environment: ${{ inputs.environment }}"
+          echo "🏷️ Cluster: ${{ needs.terraform-apply.outputs.cluster-name }}"
+          echo "🔗 Redis: ${{ needs.terraform-apply.outputs.redis-endpoint }}"
+          echo "🌐 Domain: https://livekit-eks.digi-telephony.com"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          role-session-name: GitHubActions-LiveKit-Deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: ${{ env.KUBECTL_VERSION }}
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Configure kubectl
+        run: |
+          echo "🔧 Configuring kubectl..."
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ needs.terraform-apply.outputs.cluster-name }}
+          kubectl get nodes
+
+      - name: Run LiveKit Deployment Script
+        id: run-script
+        working-directory: ./livekit-poc-infra
+        run: |
+          echo "🎥 Running LiveKit deployment script..."
+          chmod +x ./scripts/03-deploy-livekit.sh
+          
+          # Set environment variables for the script
+          export REDIS_ENDPOINT="${{ needs.terraform-apply.outputs.redis-endpoint }}"
+          export CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
+          
+          # Run the LiveKit deployment script
+          ./scripts/03-deploy-livekit.sh
+          
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "✅ LiveKit deployment completed successfully!"
+
+      - name: Verify LiveKit Deployment
+        run: |
+          echo "🔍 Verifying LiveKit deployment..."
+          
+          # Wait for pods to be ready
+          echo "⏳ Waiting for LiveKit pods to be ready..."
+          kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=livekit -n livekit --timeout=300s
+          
+          # Show deployment status
+          echo "📊 Deployment Status:"
+          kubectl get pods -n livekit
+          kubectl get services -n livekit
+          kubectl get ingress -n livekit
+          
+          # Check if ingress has address
+          echo "🔍 Checking ALB creation..."
+          kubectl describe ingress -n livekit
+          
+          echo "✅ LiveKit deployment verification completed!"
+
+  # Step 6: Destroy Infrastructure (Optional)
+  destroy-infrastructure:
+    name: 🗑️ Step 6 - Destroy Infrastructure
+    runs-on: ubuntu-latest
+    if: ${{ inputs.step == 'destroy' }}
+    environment: 
+      name: ${{ inputs.environment }}-destroy
+      url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    outputs:
+      destroy-status: ${{ steps.run-script.outputs.status }}
+    
+    steps:
+      - name: 📋 Manual Approval - Destroy Infrastructure
+        run: |
+          echo "🤔 Manual approval required for Infrastructure Destruction"
+          echo "⚠️  DANGER: This will permanently delete ALL resources!"
+          echo "📋 Resources to be destroyed:"
+          echo "   - EKS Cluster and all workloads"
+          echo "   - VPC and all networking components"
+          echo "   - ElastiCache Redis cluster and data"
+          echo "   - Load balancers and ingress resources"
+          echo "   - All security groups and IAM roles"
+          echo "🌍 Environment: ${{ inputs.environment }}"
+          echo ""
+          echo "💰 This will stop all recurring charges"
+          echo "🚨 ALL DATA WILL BE PERMANENTLY LOST!"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials using OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          role-session-name: GitHubActions-LiveKit-Destroy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+
+      - name: Run Cleanup Script
+        id: run-script
+        working-directory: ./livekit-poc-infra
+        run: |
+          echo "🗑️ Running cleanup script..."
+          chmod +x ./scripts/cleanup.sh
+          
+          # Set environment variables for the script
+          export ENVIRONMENT="${{ inputs.environment }}"
+          export AWS_REGION="${{ env.AWS_REGION }}"
+          export DEPLOYMENT_ROLE_ARN="${{ secrets.DEPLOYMENT_ROLE_ARN }}"
+          
+          # Run the cleanup script
+          ./scripts/cleanup.sh
+          
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "✅ Infrastructure destruction completed successfully!"
+
+  # Final Step: Deployment Summary
+  deployment-summary:
+    name: 📊 Deployment Summary
+    runs-on: ubuntu-latest
+    needs: [prerequisites, terraform-plan, terraform-apply, setup-load-balancer, deploy-livekit, destroy-infrastructure]
+    if: ${{ always() }}
+    
+    steps:
+      - name: Generate Deployment Summary
+        run: |
+          echo "## 📊 LiveKit EKS Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** \`${{ inputs.environment }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Step:** \`${{ inputs.step }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Region:** \`${{ env.AWS_REGION }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Workflow Run:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Prerequisites Status
+          if [ "${{ needs.prerequisites.result }}" == "success" ]; then
+            echo "### ✅ Step 1 - Prerequisites: Success" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.prerequisites.result }}" == "skipped" ]; then
+            echo "### ⏭️ Step 1 - Prerequisites: Skipped" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Step 1 - Prerequisites: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Terraform Plan Status
+          if [ "${{ needs.terraform-plan.result }}" == "success" ]; then
+            echo "### ✅ Step 2 - Terraform Plan: Success" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.terraform-plan.result }}" == "skipped" ]; then
+            echo "### ⏭️ Step 2 - Terraform Plan: Skipped" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Step 2 - Terraform Plan: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Infrastructure Status
+          if [ "${{ needs.terraform-apply.result }}" == "success" ]; then
+            echo "### ✅ Step 3 - Infrastructure: Success" >> $GITHUB_STEP_SUMMARY
+            echo "- **Cluster Name:** \`${{ needs.terraform-apply.outputs.cluster-name }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **Redis Endpoint:** \`${{ needs.terraform-apply.outputs.redis-endpoint }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "- **VPC ID:** \`${{ needs.terraform-apply.outputs.vpc-id }}\`" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.terraform-apply.result }}" == "skipped" ]; then
+            echo "### ⏭️ Step 3 - Infrastructure: Skipped" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Step 3 - Infrastructure: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Load Balancer Status
+          if [ "${{ needs.setup-load-balancer.result }}" == "success" ]; then
+            echo "### ✅ Step 4 - Load Balancer Controller: Success" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.setup-load-balancer.result }}" == "skipped" ]; then
+            echo "### ⏭️ Step 4 - Load Balancer Controller: Skipped" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Step 4 - Load Balancer Controller: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # LiveKit Status
+          if [ "${{ needs.deploy-livekit.result }}" == "success" ]; then
+            echo "### ✅ Step 5 - LiveKit Deployment: Success" >> $GITHUB_STEP_SUMMARY
+            echo "- **Access URL:** [https://livekit-eks.digi-telephony.com](https://livekit-eks.digi-telephony.com)" >> $GITHUB_STEP_SUMMARY
+            echo "- **TURN Server:** turn-eks.livekit.digi-telephony.com:3478" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.deploy-livekit.result }}" == "skipped" ]; then
+            echo "### ⏭️ Step 5 - LiveKit Deployment: Skipped" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Step 5 - LiveKit Deployment: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          # Destroy Status
+          if [ "${{ needs.destroy-infrastructure.result }}" == "success" ]; then
+            echo "### ✅ Step 6 - Infrastructure Destroyed: Success" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.destroy-infrastructure.result }}" == "skipped" ]; then
+            echo "### ⏭️ Step 6 - Destroy Infrastructure: Skipped" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ❌ Step 6 - Destroy Infrastructure: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔗 Useful Commands" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "# Configure kubectl" >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ needs.terraform-apply.outputs.cluster-name }}" ]; then
+            echo "aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ needs.terraform-apply.outputs.cluster-name }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name <cluster-name>" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# Check LiveKit pods" >> $GITHUB_STEP_SUMMARY
+          echo "kubectl get pods -n livekit" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# View LiveKit logs" >> $GITHUB_STEP_SUMMARY
+          echo "kubectl logs -n livekit -l app.kubernetes.io/name=livekit -f" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# Check ingress status" >> $GITHUB_STEP_SUMMARY
+          echo "kubectl get ingress -n livekit" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 Next Steps" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.step }}" == "all" ] && [ "${{ needs.deploy-livekit.result }}" == "success" ]; then
+            echo "🎉 **Complete deployment successful!**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "1. Test SIP connectivity from Twilio" >> $GITHUB_STEP_SUMMARY
+            echo "2. Verify WebRTC media flow" >> $GITHUB_STEP_SUMMARY
+            echo "3. Set up monitoring and alerting" >> $GITHUB_STEP_SUMMARY
+            echo "4. Configure backup strategies" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ inputs.step }}" == "terraform-apply" ] && [ "${{ needs.terraform-apply.result }}" == "success" ]; then
+            echo "1. Run workflow with step: **load-balancer**" >> $GITHUB_STEP_SUMMARY
+            echo "2. Then run workflow with step: **livekit**" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ inputs.step }}" == "load-balancer" ] && [ "${{ needs.setup-load-balancer.result }}" == "success" ]; then
+            echo "1. Run workflow with step: **livekit**" >> $GITHUB_STEP_SUMMARY
+          fi
