@@ -177,7 +177,7 @@ jobs:
       name: ${{ inputs.environment }}-terraform-apply
       url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     outputs:
-      apply-status: ${{ steps.run-script.outputs.status }}
+      apply-status: ${{ steps.terraform-apply.outputs.status }}
       cluster-name: ${{ steps.get-outputs.outputs.cluster_name }}
       redis-endpoint: ${{ steps.get-outputs.outputs.redis_endpoint }}
       vpc-id: ${{ steps.get-outputs.outputs.vpc_id }}
@@ -234,21 +234,18 @@ jobs:
             exit 1
           fi
 
-      - name: Run Infrastructure Deployment Script
-        id: run-script
+      - name: Apply Terraform Infrastructure
+        id: terraform-apply
+        working-directory: resources
         run: |
-          echo "🚀 Running infrastructure deployment script..."
-          chmod +x scripts/01-deploy-infrastructure.sh
+          echo "🚀 Applying Terraform infrastructure..."
           
-          # Set environment variables for the script
-          export ENVIRONMENT="${{ inputs.environment }}"
-          export AWS_REGION="${{ env.AWS_REGION }}"
-          export TF_AUTO_APPROVE=true
-          export CI=true
-          export DEPLOYMENT_ROLE_ARN="${{ secrets.DEPLOYMENT_ROLE_ARN }}"
+          # Prepare Terraform variables
+          TERRAFORM_VARS="-var-file=../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars"
+          TERRAFORM_VARS="$TERRAFORM_VARS -var=deployment_role_arn=${{ secrets.DEPLOYMENT_ROLE_ARN }}"
           
-          # Run the deployment script
-          ./scripts/01-deploy-infrastructure.sh
+          # Apply infrastructure
+          terraform apply $TERRAFORM_VARS -auto-approve
           
           echo "status=success" >> $GITHUB_OUTPUT
           echo "✅ Infrastructure deployment completed successfully!"
@@ -455,7 +452,7 @@ jobs:
       name: ${{ inputs.environment }}-destroy
       url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     outputs:
-      destroy-status: ${{ steps.run-script.outputs.status }}
+      destroy-status: ${{ steps.terraform-destroy.outputs.status }}
     
     steps:
       - name: 📋 Manual Approval - Destroy Infrastructure
@@ -502,22 +499,93 @@ jobs:
             exit 1
           fi
 
-      - name: Run Cleanup Script
-        id: run-script
+      - name: Clean Kubernetes Resources (Optional)
+        continue-on-error: true
         run: |
-          echo "🗑️ Running cleanup script..."
-          chmod +x scripts/cleanup.sh
+          echo "🗑️ Cleaning Kubernetes resources..."
           
-          # Set environment variables for the script
-          export ENVIRONMENT="${{ inputs.environment }}"
-          export AWS_REGION="${{ env.AWS_REGION }}"
-          export DEPLOYMENT_ROLE_ARN="${{ secrets.DEPLOYMENT_ROLE_ARN }}"
+          # Try to get cluster name from backend if it exists
+          cd resources
+          CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "")
           
-          # Run the cleanup script
-          ./scripts/cleanup.sh
+          if [ -n "$CLUSTER_NAME" ] && [ "$CLUSTER_NAME" != "" ]; then
+            echo "📋 Found cluster: $CLUSTER_NAME"
+            
+            # Configure kubectl
+            aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name "$CLUSTER_NAME" 2>/dev/null || echo "Could not configure kubectl"
+            
+            # Delete LiveKit namespace
+            kubectl delete namespace livekit --ignore-not-found=true 2>/dev/null || echo "Namespace already deleted"
+            
+            # Delete AWS Load Balancer Controller
+            helm uninstall aws-load-balancer-controller -n kube-system 2>/dev/null || echo "Controller already deleted"
+          else
+            echo "⚠️ No cluster found - skipping Kubernetes cleanup"
+          fi
+
+      - name: Destroy Terraform Infrastructure
+        id: terraform-destroy
+        working-directory: resources
+        run: |
+          echo "🗑️ Destroying Terraform infrastructure..."
+          
+          # Validate Terraform configuration first
+          echo "🔍 Validating Terraform configuration..."
+          if ! terraform validate; then
+            echo "⚠️ Terraform validation failed - configuration may have errors"
+            echo "Proceeding with destroy anyway..."
+          fi
+          
+          # Prepare Terraform variables
+          TERRAFORM_VARS="-var-file=../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars"
+          TERRAFORM_VARS="$TERRAFORM_VARS -var=deployment_role_arn=${{ secrets.DEPLOYMENT_ROLE_ARN }}"
+          
+          # Destroy infrastructure
+          echo "🗑️ Running terraform destroy..."
+          if terraform destroy $TERRAFORM_VARS -auto-approve; then
+            echo "✅ Terraform destroy completed successfully"
+          else
+            echo "⚠️ Terraform destroy encountered issues"
+            echo "📋 Some resources may need manual cleanup in AWS Console"
+            exit 1
+          fi
           
           echo "status=success" >> $GITHUB_OUTPUT
           echo "✅ Infrastructure destruction completed successfully!"
+
+      - name: Verify Resource Cleanup
+        continue-on-error: true
+        run: |
+          echo "🔍 Verifying resource cleanup..."
+          
+          # Check for remaining EKS clusters
+          echo "📋 Checking EKS clusters..."
+          CLUSTERS=$(aws eks list-clusters --region ${{ env.AWS_REGION }} --query 'clusters[]' --output text 2>/dev/null || echo "")
+          if echo "$CLUSTERS" | grep -q "lp.*${{ inputs.environment }}"; then
+            echo "⚠️ Found remaining EKS clusters: $CLUSTERS"
+          else
+            echo "✅ No EKS clusters found"
+          fi
+          
+          # Check for remaining VPCs
+          echo "📋 Checking VPCs..."
+          VPCS=$(aws ec2 describe-vpcs --region ${{ env.AWS_REGION }} --filters "Name=tag:Name,Values=*lp*${{ inputs.environment }}*" --query 'Vpcs[].VpcId' --output text 2>/dev/null || echo "")
+          if [ -n "$VPCS" ]; then
+            echo "⚠️ Found remaining VPCs: $VPCS"
+          else
+            echo "✅ No custom VPCs found"
+          fi
+          
+          # Check for remaining ElastiCache clusters
+          echo "📋 Checking ElastiCache clusters..."
+          REDIS=$(aws elasticache describe-replication-groups --region ${{ env.AWS_REGION }} --query 'ReplicationGroups[].ReplicationGroupId' --output text 2>/dev/null || echo "")
+          if echo "$REDIS" | grep -q "lp.*${{ inputs.environment }}"; then
+            echo "⚠️ Found remaining Redis clusters: $REDIS"
+          else
+            echo "✅ No Redis clusters found"
+          fi
+          
+          echo "🎉 Resource cleanup verification completed!"
 
   # Final Step: Deployment Summary
   deployment-summary:
