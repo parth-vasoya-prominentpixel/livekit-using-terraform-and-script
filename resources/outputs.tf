@@ -153,7 +153,7 @@ output "iam_roles" {
 output "cluster_addons_status" {
   description = "Status of EKS cluster addons"
   value = {
-    for addon_name, addon in module.eks.addons : addon_name => {
+    for addon_name, addon in module.eks.cluster_addons : addon_name => {
       addon_name    = addon.addon_name
       addon_version = addon.addon_version
       arn          = addon.arn
@@ -164,9 +164,9 @@ output "cluster_addons_status" {
 output "ebs_csi_driver_status" {
   description = "Status of EBS CSI driver addon"
   value = {
-    addon_name               = try(module.eks.addons["aws-ebs-csi-driver"].addon_name, "not-configured")
-    addon_version            = try(module.eks.addons["aws-ebs-csi-driver"].addon_version, "not-configured")
-    arn                      = try(module.eks.addons["aws-ebs-csi-driver"].arn, "not-configured")
+    addon_name               = try(module.eks.cluster_addons["aws-ebs-csi-driver"].addon_name, "not-configured")
+    addon_version            = try(module.eks.cluster_addons["aws-ebs-csi-driver"].addon_version, "not-configured")
+    arn                      = try(module.eks.cluster_addons["aws-ebs-csi-driver"].arn, "not-configured")
     service_account_role_arn = aws_iam_role.ebs_csi_irsa_role.arn
   }
 }

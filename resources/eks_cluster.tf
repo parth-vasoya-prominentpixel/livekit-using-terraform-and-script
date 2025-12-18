@@ -1,24 +1,23 @@
-# EKS Cluster using official module - simplified approach based on official examples
+# EKS Cluster - Based on official terraform-aws-modules/eks/aws examples
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "~> 20.0"
 
-  # Basic cluster configuration
-  name               = local.cluster_name
-  kubernetes_version = var.cluster_version
+  cluster_name    = local.cluster_name
+  cluster_version = var.cluster_version
 
-  # Network configuration
+  # VPC Configuration
   vpc_id     = local.vpc_id
   subnet_ids = local.subnet_ids
 
-  # Endpoint configuration
-  endpoint_public_access = true
+  # Cluster endpoint configuration
+  cluster_endpoint_public_access = true
 
-  # Cluster creator admin permissions
+  # Enable cluster creator admin permissions
   enable_cluster_creator_admin_permissions = true
 
-  # EKS Addons - using the new simplified approach
-  addons = {
+  # EKS Addons
+  cluster_addons = {
     coredns = {
       most_recent = true
     }
@@ -34,7 +33,7 @@ module "eks" {
     }
   }
 
-  # EKS Managed Node Groups - simplified configuration
+  # EKS Managed Node Groups
   eks_managed_node_groups = {
     for name, config in var.node_groups : name => {
       instance_types = config.instance_types
@@ -42,10 +41,10 @@ module "eks" {
       max_size       = config.max_size
       desired_size   = config.desired_size
 
-      # Use private subnets for security
+      # Use private subnets
       subnet_ids = local.private_subnet_ids
 
-      # Enable cluster autoscaler labels
+      # Labels for cluster autoscaler
       labels = {
         "cluster-autoscaler/enabled" = "true"
         "cluster-autoscaler/cluster" = local.cluster_name
@@ -55,7 +54,7 @@ module "eks" {
       # Attach SIP security group
       vpc_security_group_ids = [aws_security_group.sip_traffic.id]
 
-      # Security configuration
+      # Security settings
       metadata_options = {
         http_endpoint = "enabled"
         http_tokens   = "required"
