@@ -144,31 +144,21 @@ output "deployment_summary" {
 # IAM Roles and EKS Addons Outputs
 ###############################
 
-output "iam_roles" {
-  description = "IAM roles created for EKS services with IRSA"
+output "cluster_configuration" {
+  description = "EKS cluster configuration"
   value = {
-    ebs_csi_driver = {
-      role_arn           = aws_iam_role.ebs_csi_irsa_role.arn
-      service_account    = "system:serviceaccount:kube-system:ebs-csi-controller-sa"
-      policy_attached    = "AmazonEBSCSIDriverPolicy"
-    }
-    load_balancer_controller = {
-      role_arn           = aws_iam_role.load_balancer_controller_irsa_role.arn
-      service_account    = "system:serviceaccount:kube-system:aws-load-balancer-controller"
-      policy_attached    = "Custom Load Balancer Policy"
-    }
-    cluster_autoscaler = {
-      role_arn           = aws_iam_role.cluster_autoscaler_irsa_role.arn
-      service_account    = "system:serviceaccount:kube-system:cluster-autoscaler"
-      policy_attached    = "Custom Autoscaler Policy"
-    }
+    cluster_name      = module.eks.cluster_name
+    kubernetes_version = var.cluster_version
+    managed_nodes     = true
+    ami_type         = "AL2_x86_64"
+    instance_types   = ["t3.medium"]
   }
 }
 
 output "cluster_addons_status" {
-  description = "Status of EKS cluster addons"
+  description = "EKS cluster addons"
   value = {
-    for addon_name, addon in module.eks.cluster_addons : addon_name => {
+    for addon_name, addon in module.eks.addons : addon_name => {
       addon_name    = addon.addon_name
       addon_version = addon.addon_version
       arn          = addon.arn
@@ -176,15 +166,7 @@ output "cluster_addons_status" {
   }
 }
 
-output "ebs_csi_driver_status" {
-  description = "Status of EBS CSI driver addon"
-  value = {
-    addon_name               = try(module.eks.cluster_addons["aws-ebs-csi-driver"].addon_name, "not-configured")
-    addon_version            = try(module.eks.cluster_addons["aws-ebs-csi-driver"].addon_version, "not-configured")
-    arn                      = try(module.eks.cluster_addons["aws-ebs-csi-driver"].arn, "not-configured")
-    service_account_role_arn = aws_iam_role.ebs_csi_irsa_role.arn
-  }
-}
+
 
 output "cluster_access_configuration" {
   description = "EKS cluster access configuration"
@@ -193,17 +175,19 @@ output "cluster_access_configuration" {
     current_caller_arn          = data.aws_caller_identity.current.arn
     current_user_arn            = local.current_user_arn
     cluster_creator_permissions = true
-    auto_mode_enabled          = true
-    access_entries_configured   = true
+    managed_node_groups        = true
   }
 }
 
-output "auto_mode_status" {
-  description = "Status of EKS Auto Mode"
+output "node_groups" {
+  description = "EKS managed node groups"
   value = {
-    compute_config_enabled = true
-    node_pools            = ["general-purpose"]
-    auto_scaling_enabled  = true
+    for name, ng in module.eks.eks_managed_node_groups : name => {
+      node_group_arn = ng.node_group_arn
+      node_group_id  = ng.node_group_id
+      instance_types = ng.instance_types
+      ami_type      = ng.ami_type
+    }
   }
 }
 
@@ -211,7 +195,6 @@ output "cluster_security_groups" {
   description = "Security groups attached to the cluster"
   value = {
     cluster_security_group_id = module.eks.cluster_security_group_id
-    node_security_group_id    = module.eks.node_security_group_id
     sip_security_group_id     = aws_security_group.sip_traffic.id
   }
 }
