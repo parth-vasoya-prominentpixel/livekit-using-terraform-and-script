@@ -36,9 +36,12 @@ output "cluster_version" {
 # EKS Node Groups Outputs
 ###############################
 
-output "node_groups" {
-  description = "Map of attribute maps for all EKS node groups created"
-  value       = module.eks.eks_managed_node_groups
+output "compute_config" {
+  description = "EKS Auto Mode compute configuration"
+  value = {
+    enabled    = true
+    node_pools = ["general-purpose"]
+  }
 }
 
 ###############################
@@ -142,11 +145,23 @@ output "deployment_summary" {
 ###############################
 
 output "iam_roles" {
-  description = "IAM roles created for EKS services"
+  description = "IAM roles created for EKS services with IRSA"
   value = {
-    ebs_csi_driver_role_arn           = aws_iam_role.ebs_csi_irsa_role.arn
-    load_balancer_controller_role_arn = aws_iam_role.load_balancer_controller_irsa_role.arn
-    cluster_autoscaler_role_arn       = aws_iam_role.cluster_autoscaler_irsa_role.arn
+    ebs_csi_driver = {
+      role_arn           = aws_iam_role.ebs_csi_irsa_role.arn
+      service_account    = "system:serviceaccount:kube-system:ebs-csi-controller-sa"
+      policy_attached    = "AmazonEBSCSIDriverPolicy"
+    }
+    load_balancer_controller = {
+      role_arn           = aws_iam_role.load_balancer_controller_irsa_role.arn
+      service_account    = "system:serviceaccount:kube-system:aws-load-balancer-controller"
+      policy_attached    = "Custom Load Balancer Policy"
+    }
+    cluster_autoscaler = {
+      role_arn           = aws_iam_role.cluster_autoscaler_irsa_role.arn
+      service_account    = "system:serviceaccount:kube-system:cluster-autoscaler"
+      policy_attached    = "Custom Autoscaler Policy"
+    }
   }
 }
 
@@ -178,17 +193,17 @@ output "cluster_access_configuration" {
     current_caller_arn          = data.aws_caller_identity.current.arn
     current_user_arn            = local.current_user_arn
     cluster_creator_permissions = true
-    access_entries_configured   = var.deployment_role_arn != "" ? true : false
+    auto_mode_enabled          = true
+    access_entries_configured   = true
   }
 }
 
-output "node_group_status" {
-  description = "Status of EKS node groups"
+output "auto_mode_status" {
+  description = "Status of EKS Auto Mode"
   value = {
-    for name, ng in module.eks.eks_managed_node_groups : name => {
-      node_group_arn = ng.node_group_arn
-      node_group_id  = ng.node_group_id
-    }
+    compute_config_enabled = true
+    node_pools            = ["general-purpose"]
+    auto_scaling_enabled  = true
   }
 }
 

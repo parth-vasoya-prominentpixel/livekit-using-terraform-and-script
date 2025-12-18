@@ -12,15 +12,8 @@ public_subnets  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
 cluster_name    = "livekit"
 cluster_version = "1.34"
 
-# Node Group Configuration
-node_groups = {
-  livekit_nodes = {
-    instance_types = ["t3.medium"]
-    min_size       = 1
-    max_size       = 10
-    desired_size   = 3
-  }
-}
+# EKS Auto Mode Configuration
+auto_mode_enabled = true
 
 # ElastiCache Redis Configuration
 redis_node_type = "cache.t3.micro"

@@ -1,4 +1,4 @@
-# EKS Cluster - Based on official terraform-aws-modules/eks/aws examples
+# EKS Cluster with proper access entries and IRSA configuration
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "~> 20.0"
@@ -15,6 +15,12 @@ module "eks" {
 
   # Enable cluster creator admin permissions
   enable_cluster_creator_admin_permissions = true
+
+  # EKS Auto Mode compute configuration
+  compute_config = {
+    enabled    = true
+    node_pools = ["general-purpose"]
+  }
 
   # EKS Addons
   cluster_addons = {
@@ -33,40 +39,11 @@ module "eks" {
     }
   }
 
-  # EKS Managed Node Groups
-  eks_managed_node_groups = {
-    for name, config in var.node_groups : name => {
-      instance_types = config.instance_types
-      min_size       = config.min_size
-      max_size       = config.max_size
-      desired_size   = config.desired_size
-
-      # Use private subnets
-      subnet_ids = local.private_subnet_ids
-
-      # Labels for cluster autoscaler
-      labels = {
-        "cluster-autoscaler/enabled" = "true"
-        "cluster-autoscaler/cluster" = local.cluster_name
-        "node-type"                  = "livekit-worker"
-      }
-
-      # Attach SIP security group
-      vpc_security_group_ids = [aws_security_group.sip_traffic.id]
-
-      # Security settings
-      metadata_options = {
-        http_endpoint = "enabled"
-        http_tokens   = "required"
-        http_put_response_hop_limit = 2
-      }
-    }
-  }
-
-  # Access entries for deployment role
-  access_entries = var.deployment_role_arn != "" ? {
-    deployment_role = {
-      principal_arn = var.deployment_role_arn
+  # Access entries for proper cluster access
+  access_entries = {
+    # Current user/role access
+    cluster_creator = {
+      principal_arn = data.aws_caller_identity.current.arn
       policy_associations = {
         admin = {
           policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
@@ -76,7 +53,20 @@ module "eks" {
         }
       }
     }
-  } : {}
+    
+    # Deployment role access (if provided)
+    deployment_role = var.deployment_role_arn != "" ? {
+      principal_arn = var.deployment_role_arn
+      policy_associations = {
+        admin = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = {
+            type = "cluster"
+          }
+        }
+      }
+    } : null
+  }
 
   tags = local.tags
 }
@@ -347,4 +337,41 @@ resource "aws_iam_role_policy" "cluster_autoscaler_policy" {
       }
     ]
   })
+}
+
+# Create Kubernetes service accounts with proper IRSA annotations
+resource "kubernetes_service_account" "ebs_csi_controller" {
+  metadata {
+    name      = "ebs-csi-controller-sa"
+    namespace = "kube-system"
+    annotations = {
+      "eks.amazonaws.com/role-arn" = aws_iam_role.ebs_csi_irsa_role.arn
+    }
+  }
+
+  depends_on = [module.eks]
+}
+
+resource "kubernetes_service_account" "aws_load_balancer_controller" {
+  metadata {
+    name      = "aws-load-balancer-controller"
+    namespace = "kube-system"
+    annotations = {
+      "eks.amazonaws.com/role-arn" = aws_iam_role.load_balancer_controller_irsa_role.arn
+    }
+  }
+
+  depends_on = [module.eks]
+}
+
+resource "kubernetes_service_account" "cluster_autoscaler" {
+  metadata {
+    name      = "cluster-autoscaler"
+    namespace = "kube-system"
+    annotations = {
+      "eks.amazonaws.com/role-arn" = aws_iam_role.cluster_autoscaler_irsa_role.arn
+    }
+  }
+
+  depends_on = [module.eks]
 }

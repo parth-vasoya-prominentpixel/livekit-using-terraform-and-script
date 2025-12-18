@@ -42,17 +42,13 @@ variable "cluster_version" {
 }
 
 ###############################
-# EKS Node Group variables
+# EKS Auto Mode variables
 ###############################
 
-variable "node_groups" {
-  description = "Map of EKS node group configurations"
-  type = map(object({
-    instance_types = list(string)
-    min_size       = number
-    max_size       = number
-    desired_size   = number
-  }))
+variable "auto_mode_enabled" {
+  description = "Enable EKS Auto Mode for compute"
+  type        = bool
+  default     = true
 }
 
 ###############################
