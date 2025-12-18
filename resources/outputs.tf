@@ -164,9 +164,9 @@ output "cluster_addons_status" {
 output "ebs_csi_driver_status" {
   description = "Status of EBS CSI driver addon"
   value = {
-    addon_name    = aws_eks_addon.ebs_csi_driver.addon_name
-    addon_version = aws_eks_addon.ebs_csi_driver.addon_version
-    status        = aws_eks_addon.ebs_csi_driver.status
+    addon_name               = aws_eks_addon.ebs_csi_driver.addon_name
+    addon_version            = aws_eks_addon.ebs_csi_driver.addon_version
+    arn                      = aws_eks_addon.ebs_csi_driver.arn
     service_account_role_arn = aws_eks_addon.ebs_csi_driver.service_account_role_arn
   }
 }
