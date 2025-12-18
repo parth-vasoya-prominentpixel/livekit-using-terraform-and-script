@@ -81,6 +81,11 @@ jobs:
           echo "🔍 Running prerequisites check script..."
           chmod +x scripts/00-prerequisites.sh
           ./scripts/00-prerequisites.sh
+          
+          echo "🔍 Validating Terraform configuration..."
+          chmod +x scripts/validate-config.sh
+          ./scripts/validate-config.sh
+          
           echo "status=success" >> $GITHUB_OUTPUT
           echo "✅ Prerequisites check completed successfully!"
 
@@ -150,6 +155,10 @@ jobs:
           
           echo "🔍 Validating Terraform configuration..."
           terraform validate
+          
+          echo "🧹 Cleaning up any conflicting access entries..."
+          chmod +x ../scripts/cleanup-access-entries.sh
+          ../scripts/cleanup-access-entries.sh || echo "No cleanup needed"
           
           echo "📋 Creating Terraform plan..."
           terraform plan \

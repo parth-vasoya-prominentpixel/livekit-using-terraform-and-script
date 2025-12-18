@@ -4,14 +4,14 @@ Production-ready Terraform setup for LiveKit on AWS EKS with GitHub Actions CI/C
 
 ## What This Creates
 
-- **New VPC**: Secure VPC with public/private subnets across 3 AZs
-- **EKS Cluster**: Fully managed Kubernetes cluster (v1.31) in private subnets
-- **Node Groups**: Auto-scaling worker nodes with cluster autoscaler support
-- **ElastiCache Redis**: Redis cluster in private subnets for LiveKit session storage
-- **Security Groups**: Port 5060 restricted to Twilio CIDRs only
-- **Load Balancer Controller**: AWS Load Balancer Controller for ingress
-- **EBS CSI Driver**: For persistent volume support
-- **IRSA Roles**: IAM roles for service accounts with proper permissions
+- **EKS Cluster**: Kubernetes v1.31 with official module v20+ configuration
+- **VPC**: Secure VPC with public/private subnets across 3 AZs
+- **Node Groups**: Auto-scaling t3.medium instances with cluster autoscaler
+- **ElastiCache Redis**: Redis cluster for LiveKit session storage
+- **Security Groups**: SIP port 5060 restricted to Twilio CIDRs only
+- **EKS Addons**: CoreDNS, kube-proxy, VPC CNI, EBS CSI driver
+- **IRSA Roles**: Service account roles for EBS CSI, Load Balancer Controller, Cluster Autoscaler
+- **Access Entries**: EKS v20+ access management for deployment role
 
 ## Deployment Methods
 

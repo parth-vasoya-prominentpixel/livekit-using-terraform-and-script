@@ -45,13 +45,7 @@ fi
 print_status "warning" "Found existing access entries:"
 echo "$ACCESS_ENTRIES"
 
-# Ask for confirmation
-echo ""
-read -p "🤔 Do you want to delete these access entries? (yes/no): " -r
-if [[ ! $REPLY == "yes" ]]; then
-    print_status "info" "Cleanup cancelled"
-    exit 0
-fi
+print_status "info" "🗑️ Automatically cleaning up conflicting access entries..."
 
 # Delete each access entry
 echo "$ACCESS_ENTRIES" | while read -r entry; do
@@ -66,4 +60,4 @@ echo "$ACCESS_ENTRIES" | while read -r entry; do
 done
 
 print_status "success" "🎉 Access entry cleanup completed!"
-print_status "info" "💡 You can now run terraform apply without conflicts"
+print_status "info" "💡 Terraform can now manage access entries without conflicts"

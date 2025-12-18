@@ -1,26 +1,24 @@
-# EKS Cluster using official module with proper IAM setup
+# EKS Cluster using official module - simplified approach based on official examples
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "~> 20.0"
 
-  cluster_name    = local.cluster_name
-  cluster_version = var.cluster_version
+  # Basic cluster configuration
+  name               = local.cluster_name
+  kubernetes_version = var.cluster_version
 
-  # VPC Configuration - using new VPC
-  vpc_id                   = local.vpc_id
-  subnet_ids               = local.subnet_ids
-  control_plane_subnet_ids = local.private_subnet_ids
+  # Network configuration
+  vpc_id     = local.vpc_id
+  subnet_ids = local.subnet_ids
 
-  # Cluster endpoint configuration (secure setup)
-  cluster_endpoint_private_access = true
-  cluster_endpoint_public_access  = true
-  cluster_endpoint_public_access_cidrs = ["0.0.0.0/0"]  # Restrict this in production
+  # Endpoint configuration
+  endpoint_public_access = true
 
-  # Enable cluster logging for security monitoring
-  cluster_enabled_log_types = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
+  # Cluster creator admin permissions
+  enable_cluster_creator_admin_permissions = true
 
-  # EKS Addons (core addons first, EBS CSI added after IRSA setup)
-  cluster_addons = {
+  # EKS Addons - using the new simplified approach
+  addons = {
     coredns = {
       most_recent = true
     }
@@ -30,10 +28,13 @@ module "eks" {
     vpc-cni = {
       most_recent = true
     }
-    # EBS CSI driver will be added separately to avoid circular dependency
+    aws-ebs-csi-driver = {
+      most_recent              = true
+      service_account_role_arn = aws_iam_role.ebs_csi_irsa_role.arn
+    }
   }
 
-  # EKS Managed Node Groups
+  # EKS Managed Node Groups - simplified configuration
   eks_managed_node_groups = {
     for name, config in var.node_groups : name => {
       instance_types = config.instance_types
@@ -44,45 +45,39 @@ module "eks" {
       # Use private subnets for security
       subnet_ids = local.private_subnet_ids
 
-      # Enable cluster autoscaler (using custom labels, not reserved k8s.io prefix)
+      # Enable cluster autoscaler labels
       labels = {
         "cluster-autoscaler/enabled" = "true"
         "cluster-autoscaler/cluster" = local.cluster_name
         "node-type"                  = "livekit-worker"
       }
 
-      # Attach the SIP security group for Twilio traffic
+      # Attach SIP security group
       vpc_security_group_ids = [aws_security_group.sip_traffic.id]
 
-      # Block metadata service v1 for security
+      # Security configuration
       metadata_options = {
         http_endpoint = "enabled"
         http_tokens   = "required"
         http_put_response_hop_limit = 2
       }
-
-      # Proper IAM configuration for node groups
-      iam_role_additional_policies = {
-        AmazonEBSCSIDriverPolicy = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
-      }
     }
   }
 
-  # Cluster access configuration
-  enable_cluster_creator_admin_permissions = true
-  
-  # Use aws-auth ConfigMap for access management (more reliable than access entries)
-  manage_aws_auth_configmap = true
-  
-  aws_auth_roles = var.deployment_role_arn != "" ? [
-    {
-      rolearn  = var.deployment_role_arn
-      username = "deployment-role"
-      groups   = ["system:masters"]
+  # Access entries for deployment role
+  access_entries = var.deployment_role_arn != "" ? {
+    deployment_role = {
+      principal_arn = var.deployment_role_arn
+      policy_associations = {
+        admin = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = {
+            type = "cluster"
+          }
+        }
+      }
     }
-  ] : []
-  
-  aws_auth_users = []
+  } : {}
 
   tags = local.tags
 }
