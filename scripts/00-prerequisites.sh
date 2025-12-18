@@ -114,7 +114,7 @@ case $OS in
         install_if_missing "aws" "curl 'https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip' -o 'awscliv2.zip' && unzip -q awscliv2.zip && sudo ./aws/install && rm -rf aws awscliv2.zip" "aws --version"
         
         # Install Terraform
-        TERRAFORM_VERSION="1.14.2"
+        TERRAFORM_VERSION="1.10.3"
         install_if_missing "terraform" "wget -q https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip && unzip -q terraform_${TERRAFORM_VERSION}_linux_amd64.zip && sudo mv terraform /usr/local/bin/ && rm terraform_${TERRAFORM_VERSION}_linux_amd64.zip" "terraform version"
         
         # Install kubectl
@@ -122,7 +122,7 @@ case $OS in
         install_if_missing "kubectl" "curl -LO 'https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl' && sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl && rm kubectl" "kubectl version --client"
         
         # Install Helm
-        HELM_VERSION="v3.19.2"
+        HELM_VERSION="v3.16.3"
         install_if_missing "helm" "curl -fsSL https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz | tar -xz && sudo mv linux-amd64/helm /usr/local/bin/ && rm -rf linux-amd64" "helm version"
         
         # Install eksctl
@@ -200,6 +200,6 @@ fi
 print_status "success" "All prerequisites are met!"
 echo ""
 echo "📋 Next steps:"
-echo "   1. Run ./01-deploy-infrastructure.sh to deploy EKS cluster"
-echo "   2. Run ./02-setup-load-balancer.sh to install AWS Load Balancer Controller"
-echo "   3. Run ./03-deploy-livekit.sh to deploy LiveKit"
+echo "   1. Deploy infrastructure: terraform init && terraform apply"
+echo "   2. Run ./scripts/02-setup-load-balancer.sh to install AWS Load Balancer Controller"
+echo "   3. Run ./scripts/03-deploy-livekit.sh to deploy LiveKit"
