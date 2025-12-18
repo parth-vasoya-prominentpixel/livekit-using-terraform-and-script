@@ -144,9 +144,9 @@ output "deployment_summary" {
 output "iam_roles" {
   description = "IAM roles created for EKS services"
   value = {
-    ebs_csi_driver_role_arn           = module.ebs_csi_irsa_role.iam_role_arn
-    load_balancer_controller_role_arn = module.load_balancer_controller_irsa_role.iam_role_arn
-    cluster_autoscaler_role_arn       = module.cluster_autoscaler_irsa_role.iam_role_arn
+    ebs_csi_driver_role_arn           = aws_iam_role.ebs_csi_irsa_role.arn
+    load_balancer_controller_role_arn = aws_iam_role.load_balancer_controller_irsa_role.arn
+    cluster_autoscaler_role_arn       = aws_iam_role.cluster_autoscaler_irsa_role.arn
   }
 }
 

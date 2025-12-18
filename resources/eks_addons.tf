@@ -3,13 +3,14 @@ resource "aws_eks_addon" "ebs_csi_driver" {
   cluster_name             = module.eks.cluster_name
   addon_name               = "aws-ebs-csi-driver"
   addon_version            = null  # Use latest compatible version
-  service_account_role_arn = module.ebs_csi_irsa_role.iam_role_arn
+  service_account_role_arn = aws_iam_role.ebs_csi_irsa_role.arn
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
   
   # Wait for IRSA role and node groups to be ready
   depends_on = [
-    module.ebs_csi_irsa_role,
+    aws_iam_role.ebs_csi_irsa_role,
+    aws_iam_role_policy_attachment.ebs_csi_policy,
     module.eks.eks_managed_node_groups,
     module.eks.cluster_addons
   ]
@@ -23,14 +24,14 @@ resource "kubernetes_service_account" "ebs_csi_controller" {
     name      = "ebs-csi-controller-sa"
     namespace = "kube-system"
     annotations = {
-      "eks.amazonaws.com/role-arn" = module.ebs_csi_irsa_role.iam_role_arn
+      "eks.amazonaws.com/role-arn" = aws_iam_role.ebs_csi_irsa_role.arn
     }
   }
 
   # Wait for cluster to be ready
   depends_on = [
     module.eks.cluster_addons,
-    module.ebs_csi_irsa_role
+    aws_iam_role.ebs_csi_irsa_role
   ]
 }
 
