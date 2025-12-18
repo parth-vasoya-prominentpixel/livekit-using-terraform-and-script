@@ -19,7 +19,7 @@ module "eks" {
   # Enable cluster logging for security monitoring
   cluster_enabled_log_types = ["api", "audit", "authenticator", "controllerManager", "scheduler"]
 
-  # EKS Addons (core addons only - EBS CSI added separately)
+  # EKS Addons (core addons first, EBS CSI added after IRSA setup)
   cluster_addons = {
     coredns = {
       most_recent = true
@@ -30,7 +30,7 @@ module "eks" {
     vpc-cni = {
       most_recent = true
     }
-    # Note: aws-ebs-csi-driver added separately after IRSA setup
+    # EBS CSI driver will be added separately to avoid circular dependency
   }
 
   # EKS Managed Node Groups
@@ -68,43 +68,21 @@ module "eks" {
     }
   }
 
-  # Cluster access entries with proper permissions
+  # Cluster access configuration
   enable_cluster_creator_admin_permissions = true
   
-  # Add access entries for deployment role and current user
-  access_entries = merge(
-    # Deployment role access (when provided)
-    var.deployment_role_arn != "" ? {
-      deployment_role = {
-        kubernetes_groups = []
-        principal_arn     = var.deployment_role_arn
-        policy_associations = {
-          admin = {
-            policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-            access_scope = {
-              type = "cluster"
-            }
-          }
-        }
-      }
-    } : {},
-    
-    # Current AWS identity (for manual access)
+  # Use aws-auth ConfigMap for access management (more reliable than access entries)
+  manage_aws_auth_configmap = true
+  
+  aws_auth_roles = var.deployment_role_arn != "" ? [
     {
-      current_user = {
-        kubernetes_groups = []
-        principal_arn     = data.aws_caller_identity.current.arn
-        policy_associations = {
-          admin = {
-            policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-            access_scope = {
-              type = "cluster"
-            }
-          }
-        }
-      }
+      rolearn  = var.deployment_role_arn
+      username = "deployment-role"
+      groups   = ["system:masters"]
     }
-  )
+  ] : []
+  
+  aws_auth_users = []
 
   tags = local.tags
 }

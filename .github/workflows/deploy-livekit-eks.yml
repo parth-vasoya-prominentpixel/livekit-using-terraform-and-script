@@ -28,9 +28,9 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  TERRAFORM_VERSION: 1.14.2
+  TERRAFORM_VERSION: 1.10.3
   KUBECTL_VERSION: v1.32.0
-  HELM_VERSION: v3.19.2
+  HELM_VERSION: v3.16.3
   EKSCTL_VERSION: 0.197.0
 
 # OIDC permissions for AWS authentication
@@ -502,26 +502,9 @@ jobs:
       - name: Clean Kubernetes Resources (Optional)
         continue-on-error: true
         run: |
-          echo "🗑️ Cleaning Kubernetes resources..."
-          
-          # Try to get cluster name from backend if it exists
-          cd resources
-          CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "")
-          
-          if [ -n "$CLUSTER_NAME" ] && [ "$CLUSTER_NAME" != "" ]; then
-            echo "📋 Found cluster: $CLUSTER_NAME"
-            
-            # Configure kubectl
-            aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name "$CLUSTER_NAME" 2>/dev/null || echo "Could not configure kubectl"
-            
-            # Delete LiveKit namespace
-            kubectl delete namespace livekit --ignore-not-found=true 2>/dev/null || echo "Namespace already deleted"
-            
-            # Delete AWS Load Balancer Controller
-            helm uninstall aws-load-balancer-controller -n kube-system 2>/dev/null || echo "Controller already deleted"
-          else
-            echo "⚠️ No cluster found - skipping Kubernetes cleanup"
-          fi
+          echo "🗑️ Running simple cleanup script..."
+          chmod +x scripts/simple-cleanup.sh
+          ./scripts/simple-cleanup.sh
 
       - name: Destroy Terraform Infrastructure
         id: terraform-destroy

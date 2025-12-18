@@ -1,129 +1,174 @@
 # LiveKit POC - EKS Infrastructure
 
-Simple and efficient Terraform setup for LiveKit on AWS EKS using official modules.
+Production-ready Terraform setup for LiveKit on AWS EKS with GitHub Actions CI/CD pipeline.
 
 ## What This Creates
 
 - **New VPC**: Secure VPC with public/private subnets across 3 AZs
 - **EKS Cluster**: Fully managed Kubernetes cluster (v1.31) in private subnets
 - **Node Groups**: Auto-scaling worker nodes with cluster autoscaler support
-- **Redis**: ElastiCache Redis in private subnets for LiveKit session storage
-- **Security**: Port 5060 restricted to Twilio CIDRs only
-- **NAT Gateways**: High availability with one NAT gateway per AZ
-- **VPC Flow Logs**: Security monitoring enabled
+- **ElastiCache Redis**: Redis cluster in private subnets for LiveKit session storage
+- **Security Groups**: Port 5060 restricted to Twilio CIDRs only
+- **Load Balancer Controller**: AWS Load Balancer Controller for ingress
+- **EBS CSI Driver**: For persistent volume support
+- **IRSA Roles**: IAM roles for service accounts with proper permissions
 
-## Prerequisites
+## Deployment Methods
 
-- AWS CLI configured
-- Terraform >= 1.0
-- kubectl
+### 🚀 GitHub Actions (Recommended)
 
-## Quick Start
+The project includes a complete CI/CD pipeline with manual approval gates:
 
-1. **Update Configuration**
-   ```bash
-   # Edit backend configuration
-   cp environments/livekit-poc/us-east-1/dev/backend.tfvars.example environments/livekit-poc/us-east-1/dev/backend.tfvars
-   # Update with your S3 bucket name
-   
-   # Edit inputs if needed
-   vim environments/livekit-poc/us-east-1/dev/inputs.tfvars
-   ```
+1. **Prerequisites**: Tool installation and validation
+2. **Terraform Plan**: Review infrastructure changes
+3. **Terraform Apply**: Deploy AWS infrastructure
+4. **Load Balancer**: Setup AWS Load Balancer Controller
+5. **LiveKit**: Deploy LiveKit application
+6. **Destroy**: Clean up all resources (optional)
 
-2. **Deploy Infrastructure**
-   ```bash
-   make init
-   make plan
-   make apply
-   ```
+**To deploy:**
+1. Push this repository to GitHub
+2. Configure GitHub secrets (see [OIDC Setup](OIDC_SETUP.md))
+3. Run the workflow: Actions → LiveKit EKS Manual Deployment Pipeline
+4. Choose environment and step, then approve each stage
 
-3. **Configure kubectl**
-   ```bash
-   make kubectl-config
-   ```
+### 🛠️ Manual Deployment
 
-## Configuration Files
+For local development or testing:
 
-### Backend Config (`backend.tfvars`)
+```bash
+# 1. Initialize Terraform
+cd resources
+terraform init -backend-config="../environments/livekit-poc/us-east-1/dev/backend.tfvars"
+
+# 2. Plan deployment
+terraform plan -var-file="../environments/livekit-poc/us-east-1/dev/inputs.tfvars"
+
+# 3. Deploy infrastructure
+terraform apply -var-file="../environments/livekit-poc/us-east-1/dev/inputs.tfvars"
+
+# 4. Configure kubectl
+aws eks update-kubeconfig --region us-east-1 --name lp-eks-livekit-use1-dev
+
+# 5. Setup Load Balancer Controller
+./scripts/02-setup-load-balancer.sh
+
+# 6. Deploy LiveKit
+./scripts/03-deploy-livekit.sh
+```
+
+## Configuration
+
+### Required GitHub Secrets
+
+For GitHub Actions deployment, configure these secrets:
+
+- `AWS_OIDC_ROLE_ARN`: GitHub OIDC role ARN for AWS authentication
+- `DEPLOYMENT_ROLE_ARN`: AWS deployment role ARN with necessary permissions
+
+See [OIDC_SETUP.md](OIDC_SETUP.md) and [ROLE_SETUP.md](ROLE_SETUP.md) for detailed setup instructions.
+
+### Configuration Files
+
+**Backend Config** (`environments/livekit-poc/us-east-1/dev/backend.tfvars`):
 ```hcl
-bucket = "your-terraform-state-bucket"
+bucket = "livekit-poc-terraform-state-bucket"
 key    = "livekit-poc/us-east-1/dev/eks-infrastructure/terraform.tfstate"
 region = "us-east-1"
 ```
 
-### Input Variables (`inputs.tfvars`)
+**Input Variables** (`environments/livekit-poc/us-east-1/dev/inputs.tfvars`):
 ```hcl
 region         = "us-east-1"
 env            = "dev"
-
-# VPC Configuration
-vpc_cidr        = "10.0.0.0/16"
-private_subnets = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
-public_subnets  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
+prefix_company = "lp"
+company        = "livekit-poc"
 
 # EKS Configuration
-cluster_name    = "livekit-cluster"
+cluster_name    = "livekit"
 cluster_version = "1.31"
 
 node_groups = {
   livekit_nodes = {
-    instance_types = ["t3.medium", "t3.large"]
+    instance_types = ["t3.medium"]
     min_size       = 1
     max_size       = 10
-    desired_size   = 2
+    desired_size   = 3
   }
 }
 
+# ElastiCache Redis
 redis_node_type = "cache.t3.micro"
+
+# Deployment role ARN
+deployment_role_arn = "arn:aws:iam::ACCOUNT:role/lp-iam-resource-creation-role"
 ```
 
 ## Security Features
 
-- **New VPC**: Isolated network environment with proper subnet segmentation
-- **Private Subnets**: EKS nodes and Redis deployed in private subnets only
-- **NAT Gateways**: Secure outbound internet access for private resources
-- **Port 5060**: Only accessible from Twilio CIDR blocks
-- **Redis**: Only accessible from EKS cluster nodes
-- **VPC Flow Logs**: Network traffic monitoring for security analysis
-- **IMDSv2**: Enforced on EC2 instances for enhanced security
-- **Encryption**: Redis encryption at rest enabled
+- **VPC Isolation**: Dedicated VPC with proper subnet segmentation
+- **Private Deployment**: EKS nodes and Redis in private subnets only
+- **SIP Security**: Port 5060 restricted to Twilio CIDR blocks only
+- **IRSA**: IAM roles for service accounts with least privilege
+- **Encryption**: Redis encryption at rest and in transit
+- **IMDSv2**: Enforced on all EC2 instances
+- **Network Security**: Security groups with minimal required access
 
-## Outputs
+## Accessing Your Deployment
 
-After deployment, get important values:
-```bash
-# Redis endpoint for LiveKit
-terraform output redis_cluster_endpoint
-
-# Cluster name
-terraform output cluster_name
-
-# kubectl config command
-terraform output kubectl_config_command
-```
-
-## LiveKit Configuration
-
-Use the Redis endpoint in your LiveKit values.yaml:
-```yaml
-livekit:
-  redis:
-    address: "<redis-endpoint-from-output>"
-```
-
-## Makefile Commands
+After successful deployment:
 
 ```bash
-make init     # Initialize Terraform
-make plan     # Plan deployment
-make apply    # Deploy infrastructure
-make destroy  # Destroy infrastructure
-make kubectl-config  # Configure kubectl
+# Configure kubectl
+aws eks update-kubeconfig --region us-east-1 --name lp-eks-livekit-use1-dev
+
+# Check LiveKit pods
+kubectl get pods -n livekit
+
+# View LiveKit logs
+kubectl logs -n livekit -l app.kubernetes.io/name=livekit -f
+
+# Check ingress (ALB)
+kubectl get ingress -n livekit
 ```
 
-## Clean Architecture
+**LiveKit Access URL**: https://livekit-eks.digi-telephony.com
 
-- Uses official Terraform modules only
-- No custom resources where modules exist
-- Simple, maintainable configuration
-- Follows AWS best practices
+## Project Structure
+
+```
+├── .github/workflows/          # GitHub Actions CI/CD pipeline
+├── environments/               # Environment-specific configurations
+│   └── livekit-poc/us-east-1/dev/
+├── resources/                  # Terraform infrastructure code
+├── scripts/                    # Deployment and setup scripts
+├── docs/                      # Documentation
+│   └── archive/               # Archived documentation
+├── DEPLOYMENT.md              # Detailed deployment guide
+├── OIDC_SETUP.md             # GitHub OIDC configuration
+├── ROLE_SETUP.md             # AWS IAM role setup
+└── QUICK_REFERENCE.md        # Quick commands reference
+```
+
+## Troubleshooting
+
+- **EBS CSI Driver Issues**: Check IRSA role permissions and node group status
+- **Load Balancer Issues**: Verify AWS Load Balancer Controller deployment
+- **Access Issues**: Ensure deployment role has proper EKS permissions
+- **Networking Issues**: Check security groups and VPC configuration
+
+For detailed troubleshooting, see the archived documentation in `docs/archive/`.
+
+## Cost Optimization
+
+**Estimated Monthly Costs (us-east-1)**:
+- EKS Cluster: ~$72
+- NAT Gateways (3x): ~$135
+- ElastiCache Redis: ~$15
+- EC2 Instances (3x t3.medium): ~$95
+- **Total**: ~$317/month
+
+**Cost Reduction Tips**:
+- Use single NAT Gateway for dev environments
+- Scale down node groups when not in use
+- Use smaller instance types for testing

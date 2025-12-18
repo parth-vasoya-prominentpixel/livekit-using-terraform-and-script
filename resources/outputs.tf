@@ -171,12 +171,14 @@ output "ebs_csi_driver_status" {
   }
 }
 
-output "cluster_access_entries" {
-  description = "EKS cluster access entries configured"
+output "cluster_access_configuration" {
+  description = "EKS cluster access configuration"
   value = {
-    deployment_role_arn = var.deployment_role_arn
-    current_caller_arn  = data.aws_caller_identity.current.arn
+    deployment_role_arn         = var.deployment_role_arn
+    current_caller_arn          = data.aws_caller_identity.current.arn
+    current_user_arn           = local.current_user_arn
     cluster_creator_permissions = true
+    aws_auth_configmap_managed  = true
   }
 }
 

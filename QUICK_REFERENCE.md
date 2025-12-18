@@ -1,135 +1,85 @@
-# LiveKit EKS Quick Reference
+# Quick Reference Guide
 
-## 🚀 Quick Start Commands
+## GitHub Actions Deployment (Recommended)
 
-### Configure kubectl
-```bash
-aws eks update-kubeconfig --region us-east-1 --name lp-eks-livekit-use1-dev
-```
+### 🚀 Complete Deployment
+1. Go to **Actions** → **LiveKit EKS Manual Deployment Pipeline**
+2. Click **Run workflow**
+3. Select `environment: dev` and `step: all`
+4. Approve each step when prompted
 
-### Check Deployment Status
-```bash
-# Check all pods
-kubectl get pods -A
+### 🗑️ Destroy Infrastructure
+1. Run workflow with `step: destroy`
+2. Approve the destruction (⚠️ **ALL DATA WILL BE LOST!**)
 
-# Check LiveKit specifically
-kubectl get pods -n livekit
-kubectl get services -n livekit
-kubectl get ingress -n livekit
+## Manual Commands
 
-# Check Load Balancer Controller
-kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
-```
-
-### View Logs
-```bash
-# LiveKit logs
-kubectl logs -n livekit -l app.kubernetes.io/name=livekit -f
-
-# Load Balancer Controller logs
-kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller -f
-```
-
-### Troubleshooting
-```bash
-# Describe problematic pods
-kubectl describe pod -n livekit <pod-name>
-
-# Check events
-kubectl get events -n livekit --sort-by='.lastTimestamp'
-
-# Check ingress details
-kubectl describe ingress -n livekit
-```
-
-## 🔧 Manual Deployment Commands
-
-### Prerequisites
-```bash
-./scripts/00-prerequisites.sh
-```
-
-### Infrastructure
+### Terraform Operations
 ```bash
 cd resources
-terraform init
+
+# Initialize
+terraform init -backend-config="../environments/livekit-poc/us-east-1/dev/backend.tfvars"
+
+# Plan
 terraform plan -var-file="../environments/livekit-poc/us-east-1/dev/inputs.tfvars"
+
+# Apply
 terraform apply -var-file="../environments/livekit-poc/us-east-1/dev/inputs.tfvars"
-```
 
-### Load Balancer
-```bash
-./scripts/02-setup-load-balancer.sh
-```
-
-### LiveKit
-```bash
-./scripts/03-deploy-livekit.sh
-```
-
-## 🌐 Access URLs
-
-- **LiveKit Server**: https://livekit-eks.digi-telephony.com
-- **TURN Server**: turn-eks.livekit.digi-telephony.com:3478
-
-## 📊 Resource Names
-
-- **EKS Cluster**: `lp-eks-livekit-use1-dev`
-- **VPC**: `lp-vpc-main-use1-dev`
-- **Redis**: `lp-ec-redis-use1-dev`
-- **Security Group**: `lp-sg-sip-twilio-use1-dev`
-
-## 🔍 Monitoring Commands
-
-```bash
-# Check cluster autoscaler
-kubectl get pods -n kube-system -l app=cluster-autoscaler
-
-# Check node status
-kubectl get nodes -o wide
-
-# Check resource usage
-kubectl top nodes
-kubectl top pods -n livekit
-```
-
-## 🗑️ Cleanup Commands
-
-```bash
-# Delete LiveKit deployment
-helm uninstall livekit -n livekit
-
-# Delete namespace
-kubectl delete namespace livekit
-
-# Destroy infrastructure
-cd resources
+# Destroy
 terraform destroy -var-file="../environments/livekit-poc/us-east-1/dev/inputs.tfvars"
 ```
 
-## 🚨 Emergency Commands
-
-### Scale Down (Cost Saving)
+### Kubernetes Operations
 ```bash
-# Scale node group to 0
-aws eks update-nodegroup-config \
-  --cluster-name lp-eks-livekit-use1-dev \
-  --nodegroup-name livekit_nodes \
-  --scaling-config minSize=0,maxSize=10,desiredSize=0 \
-  --region us-east-1
+# Configure kubectl
+aws eks update-kubeconfig --region us-east-1 --name lp-eks-livekit-use1-dev
+
+# Check LiveKit status
+kubectl get pods -n livekit
+kubectl get svc -n livekit
+kubectl get ingress -n livekit
+
+# View logs
+kubectl logs -n livekit -l app.kubernetes.io/name=livekit -f
+
+# Check cluster health
+kubectl get nodes
+kubectl get pods -n kube-system
 ```
 
-### Scale Up (Restore Service)
+## Access Information
+
+- **LiveKit URL**: https://livekit-eks.digi-telephony.com
+- **TURN Server**: turn-eks.livekit.digi-telephony.com:3478
+- **Cluster Name**: lp-eks-livekit-use1-dev
+- **Redis**: Use `terraform output redis_cluster_endpoint`
+
+## Troubleshooting
+
+### Common Issues
 ```bash
-# Scale node group back up
-aws eks update-nodegroup-config \
-  --cluster-name lp-eks-livekit-use1-dev \
-  --nodegroup-name livekit_nodes \
-  --scaling-config minSize=1,maxSize=10,desiredSize=2 \
-  --region us-east-1
+# EKS addon status
+aws eks describe-addon --cluster-name lp-eks-livekit-use1-dev --addon-name aws-ebs-csi-driver --region us-east-1
+
+# Check events
+kubectl get events --sort-by=.metadata.creationTimestamp -n livekit
+
+# Load balancer controller
+kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
 ```
 
-### Force Pod Restart
-```bash
-kubectl rollout restart deployment -n livekit
-```
+### GitHub Secrets Required
+- `AWS_OIDC_ROLE_ARN`: GitHub OIDC role ARN
+- `DEPLOYMENT_ROLE_ARN`: AWS deployment role ARN
+
+See [OIDC_SETUP.md](OIDC_SETUP.md) and [ROLE_SETUP.md](ROLE_SETUP.md) for setup instructions.
+
+## Cost Information
+
+**Estimated Monthly Cost**: ~$317
+- EKS Cluster: $72
+- NAT Gateways (3x): $135  
+- ElastiCache Redis: $15
+- EC2 Instances (3x t3.medium): $95
