@@ -139,9 +139,10 @@ output "redis_cluster_arn" {
 
 output "redis_cluster_endpoint" {
   description = "Address of the replication group configuration endpoint"
-  value       = try(
+  value       = coalesce(
     module.redis.replication_group_configuration_endpoint_address,
-    module.redis.replication_group_primary_endpoint_address
+    module.redis.replication_group_primary_endpoint_address,
+    ""
   )
 }
 
@@ -180,7 +181,7 @@ output "kubectl_config_command" {
 output "livekit_redis_config" {
   description = "Redis configuration for LiveKit values.yaml"
   value = {
-    address = "${try(module.redis.replication_group_configuration_endpoint_address, module.redis.replication_group_primary_endpoint_address)}:6379"
+    address = "${coalesce(module.redis.replication_group_configuration_endpoint_address, module.redis.replication_group_primary_endpoint_address, "localhost")}:6379"
   }
 }
 
@@ -189,7 +190,7 @@ output "deployment_summary" {
   value = {
     cluster_name     = module.eks_al2023.cluster_name
     cluster_endpoint = module.eks_al2023.cluster_endpoint
-    redis_endpoint   = "${try(module.redis.replication_group_configuration_endpoint_address, module.redis.replication_group_primary_endpoint_address)}:6379"
+    redis_endpoint   = "${coalesce(module.redis.replication_group_configuration_endpoint_address, module.redis.replication_group_primary_endpoint_address, "localhost")}:6379"
     vpc_id          = module.vpc.vpc_id
     region          = var.region
     environment     = var.env

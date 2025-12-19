@@ -16,7 +16,9 @@ module "vpc" {
   enable_dns_support   = true
 
   # Disable VPC Flow Logs to avoid deprecation warnings
-  enable_flow_log = false
+  enable_flow_log                      = false
+  create_flow_log_cloudwatch_iam_role  = false
+  create_flow_log_cloudwatch_log_group = false
 
   # EKS specific tags
   public_subnet_tags = {
