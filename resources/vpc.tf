@@ -15,6 +15,9 @@ module "vpc" {
   enable_dns_hostnames = true
   enable_dns_support   = true
 
+  # Disable VPC Flow Logs to avoid deprecation warnings
+  enable_flow_log = false
+
   # EKS specific tags
   public_subnet_tags = {
     "kubernetes.io/role/elb" = "1"

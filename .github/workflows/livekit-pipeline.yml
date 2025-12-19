@@ -135,15 +135,14 @@ jobs:
           terraform plan \
             -var-file="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars" \
             -var="deployment_role_arn=${{ secrets.DEPLOYMENT_ROLE_ARN }}" \
-            -out=tfplan \
-            -detailed-exitcode
-          
-          # Save plan output for review
-          terraform show -no-color tfplan > plan_output.txt
-          echo "plan_output=$(cat plan_output.txt)" >> $GITHUB_OUTPUT
+            -out=tfplan
           
           echo "✅ Terraform plan completed successfully!"
           echo "📊 Plan saved to tfplan file"
+          
+          # Show plan summary
+          echo "📋 Plan Summary:"
+          terraform show -no-color tfplan | head -50
 
   # Step 3: Terraform Apply
   terraform-apply:
