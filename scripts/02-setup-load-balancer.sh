@@ -1,9 +1,13 @@
 #!/bin/bash
 
-# Script to setup AWS Load Balancer Controller on EKS
-# This script is idempotent - safe to run multiple times
+# AWS Load Balancer Controller Setup Script
+# Based on official AWS documentation: https://docs.aws.amazon.com/eks/latest/userguide/aws-load-balancer-controller.html
+# Version: AWS Load Balancer Controller v2.14.1
+
+set -e
 
 echo "⚖️ Setting up AWS Load Balancer Controller..."
+echo "📋 Following official AWS EKS documentation"
 
 # Check if CLUSTER_NAME is provided
 if [ -z "$CLUSTER_NAME" ]; then
@@ -18,319 +22,229 @@ AWS_REGION=${AWS_REGION:-us-east-1}
 echo "📋 Configuration:"
 echo "   Cluster: $CLUSTER_NAME"
 echo "   Region:  $AWS_REGION"
-
-# Function to check if cluster exists
-check_cluster_exists() {
-    if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
-        return 0
-    else
-        return 1
-    fi
-}
-
-# Check if cluster exists
-if ! check_cluster_exists; then
-    echo "❌ Cluster $CLUSTER_NAME does not exist in region $AWS_REGION"
-    exit 1
-fi
-
-echo "✅ Cluster $CLUSTER_NAME exists"
-
-# Update kubeconfig with retry
-echo "🔧 Updating kubeconfig..."
-for i in {1..5}; do
-    if aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME" --alias "$CLUSTER_NAME"; then
-        echo "✅ Kubeconfig updated successfully"
-        break
-    else
-        echo "⚠️ Kubeconfig update attempt $i failed, retrying in 15 seconds..."
-        sleep 15
-        if [ $i -eq 5 ]; then
-            echo "❌ Failed to update kubeconfig after 5 attempts"
-            exit 1
-        fi
-    fi
-done
-
-# Test cluster connectivity with detailed logging and limited retries
-echo "🔍 Testing cluster connectivity..."
-echo "📋 Starting connectivity tests with detailed logging..."
-
-# Get detailed cluster information first
-echo "🔍 Gathering cluster information..."
-CLUSTER_INFO=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" 2>/dev/null)
-if [ $? -eq 0 ]; then
-    CLUSTER_STATUS=$(echo "$CLUSTER_INFO" | jq -r '.cluster.status // "UNKNOWN"')
-    CLUSTER_ENDPOINT=$(echo "$CLUSTER_INFO" | jq -r '.cluster.endpoint // "UNKNOWN"')
-    CLUSTER_VERSION=$(echo "$CLUSTER_INFO" | jq -r '.cluster.version // "UNKNOWN"')
-    CLUSTER_PLATFORM_VERSION=$(echo "$CLUSTER_INFO" | jq -r '.cluster.platformVersion // "UNKNOWN"')
-    
-    echo "📋 Cluster Details:"
-    echo "   Name: $CLUSTER_NAME"
-    echo "   Status: $CLUSTER_STATUS"
-    echo "   Endpoint: $CLUSTER_ENDPOINT"
-    echo "   K8s Version: $CLUSTER_VERSION"
-    echo "   Platform Version: $CLUSTER_PLATFORM_VERSION"
-    
-    if [ "$CLUSTER_STATUS" != "ACTIVE" ]; then
-        echo "❌ Cluster is not ACTIVE (current: $CLUSTER_STATUS)"
-        echo "� Wauit for cluster to be ACTIVE before proceeding"
-        exit 1
-    fi
-else
-    echo "❌ Failed to describe cluster - check cluster name and permissions"
-    exit 1
-fi
-
-# Check current AWS identity
-echo "🔍 Checking AWS identity..."
-AWS_IDENTITY=$(aws sts get-caller-identity 2>/dev/null)
-if [ $? -eq 0 ]; then
-    AWS_ACCOUNT=$(echo "$AWS_IDENTITY" | jq -r '.Account // "UNKNOWN"')
-    AWS_USER_ARN=$(echo "$AWS_IDENTITY" | jq -r '.Arn // "UNKNOWN"')
-    echo "📋 AWS Identity:"
-    echo "   Account: $AWS_ACCOUNT"
-    echo "   ARN: $AWS_USER_ARN"
-else
-    echo "❌ Failed to get AWS identity - check credentials"
-    exit 1
-fi
-
-# Test endpoint connectivity
-echo "🔍 Testing cluster endpoint connectivity..."
-if [ "$CLUSTER_ENDPOINT" != "UNKNOWN" ] && [ -n "$CLUSTER_ENDPOINT" ]; then
-    echo "🌐 Testing HTTPS connectivity to: $CLUSTER_ENDPOINT"
-    
-    # Test with curl
-    CURL_OUTPUT=$(curl -k -s -w "HTTP_CODE:%{http_code};TIME:%{time_total}" --connect-timeout 15 --max-time 30 "$CLUSTER_ENDPOINT/healthz" 2>&1)
-    CURL_EXIT_CODE=$?
-    
-    if [ $CURL_EXIT_CODE -eq 0 ]; then
-        echo "✅ Endpoint is reachable via HTTPS"
-        echo "📋 Response: $CURL_OUTPUT"
-    else
-        echo "⚠️ Endpoint connectivity test failed"
-        echo "📋 Error: $CURL_OUTPUT"
-        echo "💡 This might indicate network or security group issues"
-    fi
-else
-    echo "❌ No valid cluster endpoint found"
-    exit 1
-fi
-
-# Now test kubectl connectivity with limited retries
-echo "🔍 Testing kubectl connectivity (max 3 attempts)..."
-for i in {1..3}; do
-    echo "🔄 Kubectl attempt $i/3..."
-    
-    # Show current kubectl context
-    echo "📋 Current kubectl context:"
-    kubectl config current-context 2>/dev/null || echo "   ❌ No current context set"
-    
-    # Show available contexts
-    echo "📋 Available contexts:"
-    kubectl config get-contexts 2>/dev/null || echo "   ❌ No contexts available"
-    
-    # Test kubectl with detailed output
-    echo "🔍 Testing 'kubectl get nodes' with timeout..."
-    KUBECTL_OUTPUT=$(timeout 30 kubectl get nodes -v=6 2>&1)
-    KUBECTL_EXIT_CODE=$?
-    
-    if [ $KUBECTL_EXIT_CODE -eq 0 ]; then
-        echo "✅ Cluster is accessible via kubectl!"
-        NODE_COUNT=$(echo "$KUBECTL_OUTPUT" | grep -v "^NAME" | grep -c "Ready\|NotReady" || echo "0")
-        echo "📊 Found $NODE_COUNT nodes:"
-        echo "$KUBECTL_OUTPUT" | head -10
-        break
-    else
-        echo "❌ kubectl failed (exit code: $KUBECTL_EXIT_CODE)"
-        echo "📋 kubectl output (last 10 lines):"
-        echo "$KUBECTL_OUTPUT" | tail -10
-        
-        if [ $i -lt 3 ]; then
-            echo "⏳ Waiting 30 seconds before retry..."
-            sleep 30
-        else
-            echo "❌ Cluster is not accessible after 3 attempts"
-            echo ""
-            echo "🔍 FINAL DEBUGGING INFORMATION:"
-            echo "================================"
-            
-            # Show cluster details again
-            echo "📋 Cluster Status Check:"
-            aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query 'cluster.{Status:status,Endpoint:endpoint,CreatedAt:createdAt}' --output table 2>/dev/null || echo "   ❌ Could not describe cluster"
-            
-            # Show kubectl config
-            echo "📋 Kubectl Configuration:"
-            kubectl config view --minify 2>/dev/null || echo "   ❌ Could not view kubectl config"
-            
-            # Show network test
-            echo "📋 Network Connectivity:"
-            if [ -n "$CLUSTER_ENDPOINT" ]; then
-                echo "   Testing: $CLUSTER_ENDPOINT"
-                nc -zv $(echo "$CLUSTER_ENDPOINT" | sed 's|https://||' | cut -d':' -f1) 443 2>&1 || echo "   ❌ Port 443 not reachable"
-            fi
-            
-            echo ""
-            echo "💡 TROUBLESHOOTING STEPS:"
-            echo "========================"
-            echo "1. Check if cluster is fully created in AWS Console"
-            echo "2. Verify IAM permissions for EKS access"
-            echo "3. Check security groups allow HTTPS (443) access"
-            echo "4. Try accessing from AWS CloudShell:"
-            echo "   aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME"
-            echo "   kubectl get nodes"
-            echo ""
-            exit 1
-        fi
-    fi
-done
+echo "   Controller Version: v2.14.1"
 
 # Get AWS account ID
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 echo "📋 AWS Account ID: $ACCOUNT_ID"
 
-# Check if IAM policy exists, create if not
-echo "📋 Checking IAM policy..."
+# Check if cluster exists and is accessible
+echo "🔍 Verifying cluster access..."
+if ! aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+    echo "❌ Cluster $CLUSTER_NAME does not exist or is not accessible"
+    exit 1
+fi
+
+# Update kubeconfig
+echo "🔧 Updating kubeconfig..."
+aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME" --alias "$CLUSTER_NAME"
+
+# Test kubectl connectivity
+echo "🔍 Testing kubectl connectivity..."
+if ! timeout 30 kubectl get nodes >/dev/null 2>&1; then
+    echo "❌ Cluster is not accessible via kubectl"
+    echo "💡 Check IAM permissions and cluster endpoint access"
+    exit 1
+fi
+echo "✅ Cluster is accessible"
+
+# Get cluster VPC ID
+echo "🔍 Getting cluster VPC information..."
+VPC_ID=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query 'cluster.resourcesVpcConfig.vpcId' --output text)
+echo "✅ Cluster VPC ID: $VPC_ID"
+
+# Step 1: Create IAM Policy (if not exists)
+echo ""
+echo "📋 Step 1: Setting up IAM Policy..."
 POLICY_ARN="arn:aws:iam::$ACCOUNT_ID:policy/AWSLoadBalancerControllerIAMPolicy"
 
 if aws iam get-policy --policy-arn "$POLICY_ARN" >/dev/null 2>&1; then
     echo "✅ IAM policy already exists: $POLICY_ARN"
 else
     echo "📋 Creating IAM policy..."
-    if ! curl -sS -O https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.7.2/docs/install/iam_policy.json; then
+    
+    # Download the policy
+    if ! curl -sS -O https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.14.1/docs/install/iam_policy.json; then
         echo "❌ Failed to download IAM policy"
         exit 1
     fi
     
+    # Create the policy
     if aws iam create-policy \
         --policy-name AWSLoadBalancerControllerIAMPolicy \
         --policy-document file://iam_policy.json; then
         echo "✅ IAM policy created: $POLICY_ARN"
+        rm -f iam_policy.json
     else
         echo "❌ Failed to create IAM policy"
         exit 1
     fi
 fi
 
-# Check if service account already exists and handle conflicts
-echo "🔍 Checking for existing AWS Load Balancer Controller setup..."
+# Step 2: Handle Service Account - Three-tier approach
+echo ""
+echo "📋 Step 2: Setting up Service Account..."
 
-# Use unique names to avoid conflicts with existing setup
-TIMESTAMP=$(date +%s)
-SA_NAME="aws-load-balancer-controller-livekit"
-ROLE_NAME="AmazonEKSLoadBalancerControllerRole-LiveKit-${TIMESTAMP}"
+# Tier 1: Check if default service account exists and is properly configured
+DEFAULT_SA="aws-load-balancer-controller"
+UNIQUE_SA="aws-load-balancer-controller-livekit"
+SA_TO_USE=""
 
-# Check if our specific service account exists
-if kubectl get serviceaccount "$SA_NAME" -n kube-system >/dev/null 2>&1; then
-    echo "✅ Our service account $SA_NAME already exists"
-    
-    # Check if it has the correct annotations
-    SA_ROLE=$(kubectl get serviceaccount "$SA_NAME" -n kube-system -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null || echo "")
+if kubectl get serviceaccount "$DEFAULT_SA" -n kube-system >/dev/null 2>&1; then
+    SA_ROLE=$(kubectl get serviceaccount "$DEFAULT_SA" -n kube-system -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null || echo "")
     if [ -n "$SA_ROLE" ]; then
-        echo "✅ Service account has IAM role: $SA_ROLE"
-        SKIP_SA_CREATION=true
+        echo "✅ Default service account exists and is configured: $DEFAULT_SA"
+        echo "   Role: $SA_ROLE"
+        SA_TO_USE="$DEFAULT_SA"
+        
+        # Ask user if they want to use existing or create new
+        echo "🤔 Found existing service account. Options:"
+        echo "   1) Use existing service account (recommended)"
+        echo "   2) Create new service account with unique name"
+        echo "   3) Delete existing and recreate"
+        read -p "Choose option (1-3) [default: 1]: " CHOICE
+        CHOICE=${CHOICE:-1}
+        
+        case $CHOICE in
+            1)
+                echo "✅ Using existing service account: $DEFAULT_SA"
+                ;;
+            2)
+                echo "🔄 Creating new service account with unique name"
+                SA_TO_USE="$UNIQUE_SA"
+                ;;
+            3)
+                echo "🗑️ Deleting existing service account and recreating..."
+                eksctl delete iamserviceaccount \
+                    --cluster="$CLUSTER_NAME" \
+                    --namespace=kube-system \
+                    --name="$DEFAULT_SA" \
+                    --region="$AWS_REGION" || true
+                sleep 10
+                SA_TO_USE="$DEFAULT_SA"
+                ;;
+        esac
     else
-        echo "⚠️ Service account exists but has no IAM role annotation"
-        SKIP_SA_CREATION=false
+        echo "⚠️ Default service account exists but has no IAM role"
+        SA_TO_USE="$DEFAULT_SA"
     fi
 else
-    echo "📋 Our service account $SA_NAME does not exist"
-    SKIP_SA_CREATION=false
+    echo "📋 No existing service account found"
+    SA_TO_USE="$DEFAULT_SA"
 fi
 
-# Check if default service account exists (from previous setup)
-if kubectl get serviceaccount aws-load-balancer-controller -n kube-system >/dev/null 2>&1; then
-    echo "✅ Default AWS Load Balancer Controller service account already exists"
-    DEFAULT_SA_ROLE=$(kubectl get serviceaccount aws-load-balancer-controller -n kube-system -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null || echo "")
-    if [ -n "$DEFAULT_SA_ROLE" ]; then
-        echo "✅ Default service account has IAM role: $DEFAULT_SA_ROLE"
-        echo "🔄 Using existing default service account instead of creating new one"
-        SA_NAME="aws-load-balancer-controller"
-        SKIP_SA_CREATION=true
-    fi
-fi
-
-# Create service account only if needed
-if [ "$SKIP_SA_CREATION" = "false" ]; then
-    echo "🔧 Creating IAM service account with unique name: $SA_NAME"
+# Create service account if needed
+if [ "$SA_TO_USE" = "$DEFAULT_SA" ] && [ -z "$SA_ROLE" ]; then
+    echo "🔧 Creating service account: $SA_TO_USE"
     
-    # Create new service account with unique role name
-    if eksctl create iamserviceaccount \
+    eksctl create iamserviceaccount \
         --cluster="$CLUSTER_NAME" \
         --namespace=kube-system \
-        --name="$SA_NAME" \
-        --role-name "$ROLE_NAME" \
+        --name="$SA_TO_USE" \
         --attach-policy-arn="$POLICY_ARN" \
-        --approve \
-        --region="$AWS_REGION"; then
-        echo "✅ IAM service account created: $SA_NAME"
-    else
-        echo "❌ Failed to create IAM service account"
-        echo "💡 Checking if we can use existing setup..."
+        --override-existing-serviceaccounts \
+        --region="$AWS_REGION" \
+        --approve
         
-        # Fallback: try to use existing default service account
-        if kubectl get serviceaccount aws-load-balancer-controller -n kube-system >/dev/null 2>&1; then
-            echo "🔄 Using existing default service account as fallback"
-            SA_NAME="aws-load-balancer-controller"
-        else
-            echo "❌ No fallback available"
-            exit 1
-        fi
-    fi
-else
-    echo "✅ Using existing service account: $SA_NAME"
+elif [ "$SA_TO_USE" = "$UNIQUE_SA" ]; then
+    echo "🔧 Creating unique service account: $SA_TO_USE"
+    
+    UNIQUE_ROLE="AmazonEKSLoadBalancerControllerRole-LiveKit-$(date +%s)"
+    
+    eksctl create iamserviceaccount \
+        --cluster="$CLUSTER_NAME" \
+        --namespace=kube-system \
+        --name="$SA_TO_USE" \
+        --role-name="$UNIQUE_ROLE" \
+        --attach-policy-arn="$POLICY_ARN" \
+        --region="$AWS_REGION" \
+        --approve
 fi
+
+echo "✅ Service account ready: $SA_TO_USE"
+
+# Step 3: Install AWS Load Balancer Controller
+echo ""
+echo "📋 Step 3: Installing AWS Load Balancer Controller..."
 
 # Add EKS Helm repository
 echo "📦 Adding EKS Helm repository..."
-if ! helm repo add eks https://aws.github.io/eks-charts; then
-    echo "❌ Failed to add Helm repository"
-    exit 1
-fi
+helm repo add eks https://aws.github.io/eks-charts
+helm repo update eks
 
-if ! helm repo update; then
-    echo "❌ Failed to update Helm repositories"
-    exit 1
-fi
-
-# Check if Load Balancer Controller is already installed
-echo "🔍 Checking if Load Balancer Controller is installed..."
-HELM_RELEASE_NAME="aws-load-balancer-controller-livekit"
-
-# Check for existing installation (either our release or default)
+# Check for existing installations
+EXISTING_RELEASE=""
 if helm list -n kube-system | grep -q "aws-load-balancer-controller"; then
     EXISTING_RELEASE=$(helm list -n kube-system | grep "aws-load-balancer-controller" | awk '{print $1}' | head -1)
-    echo "✅ AWS Load Balancer Controller already installed as: $EXISTING_RELEASE"
+    echo "✅ Found existing Helm release: $EXISTING_RELEASE"
     
-    if [ "$EXISTING_RELEASE" = "aws-load-balancer-controller" ]; then
-        echo "🔄 Using existing default installation"
-        echo "✅ Skipping Helm installation - using existing controller"
-    else
-        echo "🔄 Upgrading existing installation: $EXISTING_RELEASE"
-        helm upgrade "$EXISTING_RELEASE" eks/aws-load-balancer-controller \
-            -n kube-system \
-            --set clusterName="$CLUSTER_NAME" \
-            --set serviceAccount.create=false \
-            --set serviceAccount.name="$SA_NAME" \
-            --set region="$AWS_REGION" \
-            --wait --timeout=5m
-    fi
+    echo "🤔 Found existing installation. Options:"
+    echo "   1) Upgrade existing installation"
+    echo "   2) Install with unique name"
+    echo "   3) Uninstall existing and reinstall"
+    read -p "Choose option (1-3) [default: 1]: " HELM_CHOICE
+    HELM_CHOICE=${HELM_CHOICE:-1}
+    
+    case $HELM_CHOICE in
+        1)
+            echo "🔄 Upgrading existing installation: $EXISTING_RELEASE"
+            helm upgrade "$EXISTING_RELEASE" eks/aws-load-balancer-controller \
+                -n kube-system \
+                --set clusterName="$CLUSTER_NAME" \
+                --set serviceAccount.create=false \
+                --set serviceAccount.name="$SA_TO_USE" \
+                --set region="$AWS_REGION" \
+                --set vpcId="$VPC_ID" \
+                --version 1.14.0 \
+                --wait --timeout=10m
+            ;;
+        2)
+            UNIQUE_RELEASE="aws-load-balancer-controller-livekit"
+            echo "🚀 Installing with unique name: $UNIQUE_RELEASE"
+            helm install "$UNIQUE_RELEASE" eks/aws-load-balancer-controller \
+                -n kube-system \
+                --set clusterName="$CLUSTER_NAME" \
+                --set serviceAccount.create=false \
+                --set serviceAccount.name="$SA_TO_USE" \
+                --set region="$AWS_REGION" \
+                --set vpcId="$VPC_ID" \
+                --version 1.14.0 \
+                --wait --timeout=10m
+            ;;
+        3)
+            echo "🗑️ Uninstalling existing and reinstalling..."
+            helm uninstall "$EXISTING_RELEASE" -n kube-system || true
+            sleep 30
+            
+            helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+                -n kube-system \
+                --set clusterName="$CLUSTER_NAME" \
+                --set serviceAccount.create=false \
+                --set serviceAccount.name="$SA_TO_USE" \
+                --set region="$AWS_REGION" \
+                --set vpcId="$VPC_ID" \
+                --version 1.14.0 \
+                --wait --timeout=10m
+            ;;
+    esac
 else
-    echo "🚀 Installing AWS Load Balancer Controller with unique name: $HELM_RELEASE_NAME"
-    helm install "$HELM_RELEASE_NAME" eks/aws-load-balancer-controller \
+    echo "🚀 Installing AWS Load Balancer Controller..."
+    helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
         -n kube-system \
         --set clusterName="$CLUSTER_NAME" \
         --set serviceAccount.create=false \
-        --set serviceAccount.name="$SA_NAME" \
+        --set serviceAccount.name="$SA_TO_USE" \
         --set region="$AWS_REGION" \
-        --wait --timeout=5m
+        --set vpcId="$VPC_ID" \
+        --version 1.14.0 \
+        --wait --timeout=10m
 fi
 
-# Verify installation
-echo "✅ Verifying AWS Load Balancer Controller installation..."
+# Step 4: Verify Installation
+echo ""
+echo "📋 Step 4: Verifying Installation..."
 
-# Check for any AWS Load Balancer Controller deployment
+# Find the deployment
 LB_DEPLOYMENT=$(kubectl get deployments -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller -o name 2>/dev/null | head -1)
 
 if [ -n "$LB_DEPLOYMENT" ]; then
@@ -340,34 +254,47 @@ if [ -n "$LB_DEPLOYMENT" ]; then
     # Show deployment status
     kubectl get deployment -n kube-system "$DEPLOYMENT_NAME"
     
-    # Show pods
-    echo "📋 Controller pods:"
-    kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
-    
-    # Check if pods are ready
-    READY_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | grep -c "Running" || echo "0")
-    TOTAL_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | wc -l || echo "0")
-    
-    echo "📊 Pod status: $READY_PODS/$TOTAL_PODS pods running"
-    
-    if [ "$READY_PODS" -gt 0 ]; then
-        echo "🎉 AWS Load Balancer Controller is running successfully!"
-        echo "✅ Service account used: $SA_NAME"
-        echo "✅ Cluster: $CLUSTER_NAME"
+    # Wait for pods to be ready
+    echo "⏳ Waiting for pods to be ready (up to 5 minutes)..."
+    if kubectl wait --for=condition=available deployment/"$DEPLOYMENT_NAME" -n kube-system --timeout=300s; then
+        echo "✅ AWS Load Balancer Controller is ready!"
+        
+        # Show pod status
+        echo "📋 Controller pods:"
+        kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+        
+        # Check logs if pods are not running
+        FAILED_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers | grep -v "Running" | awk '{print $1}' || echo "")
+        if [ -n "$FAILED_PODS" ]; then
+            echo "⚠️ Some pods are not running. Checking logs..."
+            for pod in $FAILED_PODS; do
+                echo "📋 Logs for $pod:"
+                kubectl logs "$pod" -n kube-system --tail=20 || echo "Could not get logs"
+            done
+        fi
     else
-        echo "⚠️ AWS Load Balancer Controller pods are not ready yet"
-        echo "💡 This might be normal - pods may still be starting"
+        echo "⚠️ Deployment did not become ready within 5 minutes"
+        echo "📋 Current status:"
+        kubectl get deployment -n kube-system "$DEPLOYMENT_NAME"
+        kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+        
+        echo "📋 Checking pod logs for issues..."
+        kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers | awk '{print $1}' | while read pod; do
+            echo "📋 Logs for $pod:"
+            kubectl logs "$pod" -n kube-system --tail=20 || echo "Could not get logs"
+        done
     fi
 else
     echo "❌ No AWS Load Balancer Controller deployment found"
-    echo "🔍 Checking for any load balancer related deployments..."
-    kubectl get deployments -n kube-system | grep -i "load\|alb\|elb" || echo "No load balancer deployments found"
     exit 1
 fi
 
 echo ""
+echo "🎉 AWS Load Balancer Controller setup completed!"
+echo ""
 echo "📋 Summary:"
 echo "   Cluster: $CLUSTER_NAME"
-echo "   Service Account: $SA_NAME"
+echo "   Service Account: $SA_TO_USE"
+echo "   VPC ID: $VPC_ID"
 echo "   Region: $AWS_REGION"
-echo "   Status: ✅ Ready for LiveKit deployment"
+echo "   Status: Ready for LiveKit deployment"

@@ -67,65 +67,51 @@ cd "$(dirname "$0")/.."
 cat > livekit-values-temp.yaml << EOF
 # LiveKit configuration
 livekit:
-  # Redis configuration
-  redis:
-    address: "$REDIS_ENDPOINT"
-  
-  # Server configuration
+  domain: livekit-eks.digi-telephony.com
   rtc:
-    tcp_port: 7880
+    use_external_ip: true
     port_range_start: 50000
     port_range_end: 60000
-    use_external_ip: true
-  
-  # Turn server configuration
-  turn:
-    enabled: true
-    domain: ""
-    cert_file: ""
-    key_file: ""
-  
-  # Webhook configuration
-  webhook:
-    api_key: "your-api-key"
-    url: ""
-  
-  # Keys configuration
+  redis:
+    address: "$REDIS_ENDPOINT"
   keys:
-    api_key: "your-api-key"
-    api_secret: "your-api-secret"
+    APIKmrHi78hxpbd: Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB
+  metrics:
+    enabled: true
+    prometheus:
+      enabled: true
+      port: 6789
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - livekit-livekit-server
+          topologyKey: "kubernetes.io/hostname"
 
-# Service configuration
-service:
-  type: LoadBalancer
-  annotations:
-    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
-    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+turn:
+  enabled: true
+  domain: turn-eks.livekit.digi-telephony.com
+  tls_port: 3478
+  udp_port: 3478
 
-# Ingress configuration (optional)
-ingress:
-  enabled: false
+loadBalancer:
+  type: alb
+  tls:
+    - hosts:
+        - livekit-eks.digi-telephony.com
+      certificateArn: arn:aws:acm:us-east-1:918595516608:certificate/388e3ff7-9763-4772-bfef-56cf64fcc414
 
-# Resource limits
-resources:
-  limits:
-    cpu: 1000m
-    memory: 1Gi
-  requests:
-    cpu: 500m
-    memory: 512Mi
-
-# Replica count
-replicaCount: 2
-
-# Node selector (optional)
-nodeSelector: {}
-
-# Tolerations (optional)
-tolerations: []
-
-# Affinity (optional)
-affinity: {}
 EOF
 
 # Smart Helm deployment - avoid conflicts
