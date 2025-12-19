@@ -1,25 +1,22 @@
-# EKS Cluster with managed node groups - Using stable version
+# EKS Cluster with managed node groups - Latest version v21.0
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
-  version = "~> 20.0"
+  version = "~> 21.0"
 
   name               = local.cluster_name
   kubernetes_version = var.cluster_version
 
-  # EKS Addons
-  cluster_addons = {
-    coredns = {
-      most_recent = true
+  # EKS Addons - New format for v21.0
+  addons = {
+    coredns = {}
+    eks-pod-identity-agent = {
+      before_compute = true
     }
-    kube-proxy = {
-      most_recent = true
-    }
+    kube-proxy = {}
     vpc-cni = {
-      most_recent = true
+      before_compute = true
     }
-    aws-ebs-csi-driver = {
-      most_recent = true
-    }
+    aws-ebs-csi-driver = {}
   }
 
   vpc_id     = local.vpc_id
