@@ -1,20 +1,24 @@
-# EKS Cluster with managed node groups - Based on official AL2023 example
+# EKS Cluster with managed node groups - Using stable version
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
-  version = "~> 21.0"
+  version = "~> 20.0"
 
   name               = local.cluster_name
   kubernetes_version = var.cluster_version
 
   # EKS Addons
-  addons = {
-    coredns = {}
-    eks-pod-identity-agent = {
-      before_compute = true
+  cluster_addons = {
+    coredns = {
+      most_recent = true
     }
-    kube-proxy = {}
+    kube-proxy = {
+      most_recent = true
+    }
     vpc-cni = {
-      before_compute = true
+      most_recent = true
+    }
+    aws-ebs-csi-driver = {
+      most_recent = true
     }
   }
 
@@ -43,8 +47,12 @@ module "eks" {
         "node-type"                  = "livekit-worker"
       }
 
-      # Standard Amazon Linux 2 configuration
-      # No pre_nodeadm needed for AL2
+      # Security configuration
+      metadata_options = {
+        http_endpoint = "enabled"
+        http_tokens   = "required"
+        http_put_response_hop_limit = 2
+      }
     }
   }
 

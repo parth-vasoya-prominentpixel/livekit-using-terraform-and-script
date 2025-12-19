@@ -158,7 +158,7 @@ output "cluster_configuration" {
 output "cluster_addons_status" {
   description = "EKS cluster addons"
   value = {
-    for addon_name, addon in module.eks.addons : addon_name => {
+    for addon_name, addon in module.eks.cluster_addons : addon_name => {
       addon_name    = addon.addon_name
       addon_version = addon.addon_version
       arn          = addon.arn
