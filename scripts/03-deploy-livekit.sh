@@ -1,71 +1,147 @@
 #!/bin/bash
 
-# Script to deploy LiveKit with proper configuration
+# Script to deploy LiveKit on EKS
 set -e
 
-echo "🚀 Deploying LiveKit..."
+echo "🎥 Deploying LiveKit..."
 
-# Get Redis endpoint from environment or terraform
-cd "$(dirname "$0")/../resources"
-
-# Use environment variables if available (from CI/CD), otherwise get from terraform
-if [ -n "$REDIS_ENDPOINT" ] && [ -n "$CLUSTER_NAME" ]; then
-    echo "📝 Using environment variables for configuration"
-else
-    echo "📝 Getting configuration from Terraform outputs..."
-    REDIS_ENDPOINT=$(terraform output -raw redis_cluster_endpoint)
-    CLUSTER_NAME=$(terraform output -raw cluster_name)
-fi
-
-echo "📝 Using Redis endpoint: $REDIS_ENDPOINT"
-echo "📝 Using Cluster: $CLUSTER_NAME"
-
-# Step 1: Create namespace
-echo "📁 Creating livekit namespace..."
-kubectl create namespace livekit --dry-run=client -o yaml | kubectl apply -f -
-
-# Step 2: Set context to livekit namespace
-echo "🔧 Setting kubectl context to livekit namespace..."
-kubectl config set-context --current --namespace=livekit
-
-# Step 3: Update LiveKit values file with correct Redis endpoint
-echo "📝 Updating LiveKit values.yaml with Redis endpoint..."
-cd "$(dirname "$0")/.."
-
-# Use the template values file and replace Redis endpoint
-LIVEKIT_VALUES_TEMPLATE="livekit-values.yaml"
-LIVEKIT_VALUES_FILE="livekit-values-deployed.yaml"
-
-if [ ! -f "$LIVEKIT_VALUES_TEMPLATE" ]; then
-    echo "❌ LiveKit values template not found: $LIVEKIT_VALUES_TEMPLATE"
+# Check if required environment variables are provided
+if [ -z "$CLUSTER_NAME" ]; then
+    echo "❌ CLUSTER_NAME environment variable is required"
+    echo "Usage: CLUSTER_NAME=your-cluster-name REDIS_ENDPOINT=your-redis-endpoint ./03-deploy-livekit.sh"
     exit 1
 fi
 
-# Create deployment values file by replacing the Redis endpoint placeholder
-sed "s/REDIS_ENDPOINT_PLACEHOLDER/$REDIS_ENDPOINT/g" "$LIVEKIT_VALUES_TEMPLATE" > "$LIVEKIT_VALUES_FILE"
+if [ -z "$REDIS_ENDPOINT" ]; then
+    echo "❌ REDIS_ENDPOINT environment variable is required"
+    echo "Usage: CLUSTER_NAME=your-cluster-name REDIS_ENDPOINT=your-redis-endpoint ./03-deploy-livekit.sh"
+    exit 1
+fi
 
-echo "📝 LiveKit values file updated: $LIVEKIT_VALUES_FILE"
-echo "🔗 Redis endpoint set to: $REDIS_ENDPOINT"
+# Set AWS region (default to us-east-1 if not set)
+AWS_REGION=${AWS_REGION:-us-east-1}
 
-# Step 4: Add LiveKit Helm repository
+echo "📋 Configuration:"
+echo "   Cluster: $CLUSTER_NAME"
+echo "   Region:  $AWS_REGION"
+echo "   Redis:   $REDIS_ENDPOINT"
+
+# Update kubeconfig
+echo "🔧 Updating kubeconfig..."
+aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+
+# Create namespace
+echo "📦 Creating LiveKit namespace..."
+kubectl create namespace livekit --dry-run=client -o yaml | kubectl apply -f -
+
+# Add LiveKit Helm repository
 echo "📦 Adding LiveKit Helm repository..."
 helm repo add livekit https://livekit.github.io/charts
 helm repo update
 
-# Step 5: Deploy LiveKit
-echo "🚀 Deploying LiveKit with custom values..."
-helm upgrade --install livekit livekit/livekit -f "$LIVEKIT_VALUES_FILE"
+# Update Redis endpoint in values file
+echo "🔧 Updating LiveKit values with Redis endpoint..."
+cd "$(dirname "$0")/.."
 
-# Step 6: Verify deployment
-echo "🔍 Verifying LiveKit deployment..."
-kubectl get pods -l app.kubernetes.io/name=livekit
+# Create a temporary values file with Redis endpoint
+cat > livekit-values-temp.yaml << EOF
+# LiveKit configuration
+livekit:
+  # Redis configuration
+  redis:
+    address: "$REDIS_ENDPOINT"
+  
+  # Server configuration
+  rtc:
+    tcp_port: 7880
+    port_range_start: 50000
+    port_range_end: 60000
+    use_external_ip: true
+  
+  # Turn server configuration
+  turn:
+    enabled: true
+    domain: ""
+    cert_file: ""
+    key_file: ""
+  
+  # Webhook configuration
+  webhook:
+    api_key: "your-api-key"
+    url: ""
+  
+  # Keys configuration
+  keys:
+    api_key: "your-api-key"
+    api_secret: "your-api-secret"
 
-echo "🔍 Checking services..."
-kubectl get services
+# Service configuration
+service:
+  type: LoadBalancer
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
 
-echo "🔍 Checking ingress..."
-kubectl get ingress
+# Ingress configuration (optional)
+ingress:
+  enabled: false
 
-echo "✅ LiveKit deployment complete!"
-echo "🌐 Your LiveKit server should be accessible at: https://livekit-eks.digi-telephony.com"
-echo "📊 Monitor the deployment with: kubectl get pods -w"
+# Resource limits
+resources:
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
+
+# Replica count
+replicaCount: 2
+
+# Node selector (optional)
+nodeSelector: {}
+
+# Tolerations (optional)
+tolerations: []
+
+# Affinity (optional)
+affinity: {}
+EOF
+
+# Deploy LiveKit
+echo "🚀 Deploying LiveKit..."
+helm upgrade --install livekit livekit/livekit \
+    -n livekit \
+    -f livekit-values-temp.yaml \
+    --wait --timeout=10m
+
+# Clean up temporary file
+rm -f livekit-values-temp.yaml
+
+# Wait for pods to be ready
+echo "⏳ Waiting for LiveKit pods to be ready..."
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=livekit -n livekit --timeout=300s
+
+# Get deployment status
+echo "📊 Deployment Status:"
+kubectl get pods -n livekit
+kubectl get svc -n livekit
+
+# Get LoadBalancer endpoint
+echo ""
+echo "🌐 Getting LoadBalancer endpoint..."
+LB_HOSTNAME=$(kubectl get svc -n livekit -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+if [ "$LB_HOSTNAME" != "pending" ] && [ -n "$LB_HOSTNAME" ]; then
+    echo "✅ LiveKit is accessible at: $LB_HOSTNAME"
+else
+    echo "⏳ LoadBalancer endpoint is still being provisioned..."
+    echo "   Run 'kubectl get svc -n livekit' to check status"
+fi
+
+echo ""
+echo "🎉 LiveKit deployment completed successfully!"
+echo ""
+echo "📋 Next steps:"
+echo "   1. Wait for LoadBalancer to get an external IP/hostname"
+echo "   2. Configure your LiveKit client to connect to the endpoint"
+echo "   3. Use the API key and secret from the values file"

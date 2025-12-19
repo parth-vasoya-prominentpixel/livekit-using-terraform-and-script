@@ -1,86 +1,70 @@
 #!/bin/bash
 
-# Script to install AWS Load Balancer Controller
+# Script to setup AWS Load Balancer Controller on EKS
 set -e
 
-echo "🚀 Setting up AWS Load Balancer Controller..."
+echo "⚖️ Setting up AWS Load Balancer Controller..."
 
-# Get cluster info from terraform or environment variables
-cd "$(dirname "$0")/../resources"
-
-# Use environment variables if available (from CI/CD), otherwise get from terraform
-if [ -n "$CLUSTER_NAME" ] && [ -n "$REGION" ] && [ -n "$VPC_ID" ]; then
-    echo "📝 Using environment variables for cluster info"
-else
-    echo "📝 Getting cluster info from Terraform outputs..."
-    CLUSTER_NAME=$(terraform output -raw cluster_name)
-    REGION=${AWS_REGION:-us-east-1}  # Use AWS_REGION env var or default
-    VPC_ID=$(terraform output -raw vpc_id)
-fi
-
-echo "📝 Using Cluster: $CLUSTER_NAME"
-echo "🌍 Region: $REGION"
-echo "🏠 VPC ID: $VPC_ID"
-
-# Step 1: Create IAM OIDC identity provider
-echo "🔐 Creating IAM OIDC identity provider..."
-eksctl utils associate-iam-oidc-provider --region=$REGION --cluster=$CLUSTER_NAME --approve
-
-# Step 2: Download IAM policy
-echo "📄 Downloading IAM policy for AWS Load Balancer Controller..."
-curl -O https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.7.2/docs/install/iam_policy.json
-
-# Step 3: Create IAM policy
-echo "🔧 Creating IAM policy..."
-aws iam create-policy \
-    --policy-name AWSLoadBalancerControllerIAMPolicy \
-    --policy-document file://iam_policy.json || echo "Policy already exists, continuing..."
-
-# Step 4: Create IAM role and service account
-# Get the IAM role ARN created by Terraform
-echo "🔍 Getting Load Balancer Controller IAM role from Terraform..."
-cd "$(dirname "$0")/../resources"
-LB_CONTROLLER_ROLE_ARN=$(terraform output -raw iam_roles | jq -r '.load_balancer_controller_role_arn')
-
-if [ -z "$LB_CONTROLLER_ROLE_ARN" ] || [ "$LB_CONTROLLER_ROLE_ARN" = "null" ]; then
-    echo "❌ Could not get Load Balancer Controller IAM role ARN from Terraform"
+# Check if CLUSTER_NAME is provided
+if [ -z "$CLUSTER_NAME" ]; then
+    echo "❌ CLUSTER_NAME environment variable is required"
+    echo "Usage: CLUSTER_NAME=your-cluster-name ./02-setup-load-balancer.sh"
     exit 1
 fi
 
-echo "✅ Using IAM role: $LB_CONTROLLER_ROLE_ARN"
+# Set AWS region (default to us-east-1 if not set)
+AWS_REGION=${AWS_REGION:-us-east-1}
 
-# Create service account with the Terraform-created IAM role
-echo "👤 Creating service account for AWS Load Balancer Controller..."
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  labels:
-    app.kubernetes.io/component: controller
-    app.kubernetes.io/name: aws-load-balancer-controller
-  name: aws-load-balancer-controller
-  namespace: kube-system
-  annotations:
-    eks.amazonaws.com/role-arn: $LB_CONTROLLER_ROLE_ARN
-EOF
+echo "📋 Configuration:"
+echo "   Cluster: $CLUSTER_NAME"
+echo "   Region:  $AWS_REGION"
 
-# Step 5: Install AWS Load Balancer Controller using Helm
+# Update kubeconfig
+echo "🔧 Updating kubeconfig..."
+aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
+
+# Create IAM policy for AWS Load Balancer Controller
+echo "📋 Creating IAM policy..."
+curl -O https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.7.2/docs/install/iam_policy.json
+
+aws iam create-policy \
+    --policy-name AWSLoadBalancerControllerIAMPolicy \
+    --policy-document file://iam_policy.json || echo "Policy already exists"
+
+# Get AWS account ID
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+# Create IAM service account
+echo "🔧 Creating IAM service account..."
+eksctl create iamserviceaccount \
+    --cluster=$CLUSTER_NAME \
+    --namespace=kube-system \
+    --name=aws-load-balancer-controller \
+    --role-name AmazonEKSLoadBalancerControllerRole \
+    --attach-policy-arn=arn:aws:iam::$ACCOUNT_ID:policy/AWSLoadBalancerControllerIAMPolicy \
+    --approve \
+    --region=$AWS_REGION
+
+# Add EKS Helm repository
 echo "📦 Adding EKS Helm repository..."
 helm repo add eks https://aws.github.io/eks-charts
 helm repo update
 
+# Install AWS Load Balancer Controller
 echo "🚀 Installing AWS Load Balancer Controller..."
-helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
-  -n kube-system \
-  --set clusterName=$CLUSTER_NAME \
-  --set serviceAccount.create=false \
-  --set serviceAccount.name=aws-load-balancer-controller \
-  --set region=$REGION \
-  --set vpcId=$VPC_ID
+helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+    -n kube-system \
+    --set clusterName=$CLUSTER_NAME \
+    --set serviceAccount.create=false \
+    --set serviceAccount.name=aws-load-balancer-controller \
+    --set region=$AWS_REGION
 
-# Step 6: Verify installation
-echo "🔍 Verifying AWS Load Balancer Controller installation..."
+# Wait for deployment to be ready
+echo "⏳ Waiting for AWS Load Balancer Controller to be ready..."
+kubectl wait --for=condition=available --timeout=300s deployment/aws-load-balancer-controller -n kube-system
+
+# Verify installation
+echo "✅ Verifying installation..."
 kubectl get deployment -n kube-system aws-load-balancer-controller
 
-echo "✅ AWS Load Balancer Controller setup complete!"
-echo "Next step: Run ./03-deploy-livekit.sh"
+echo "🎉 AWS Load Balancer Controller setup completed successfully!"

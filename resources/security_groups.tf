@@ -2,7 +2,7 @@
 resource "aws_security_group" "sip_traffic" {
   name_prefix = "${local.sg_name_prefix}-sip-"
   description = "Security group for SIP traffic from Twilio only"
-  vpc_id      = local.vpc_id
+  vpc_id      = module.vpc.vpc_id
 
   # Ingress rules for SIP traffic from Twilio CIDRs only
   dynamic "ingress" {
@@ -37,12 +37,6 @@ resource "aws_security_group" "sip_traffic" {
   }
 
   tags = merge(local.tags, {
-    Name = "${local.sg_name_prefix}-sip-twilio-use1-dev"
+    Name = "${local.eks_name}-sip-twilio"
   })
-}
-
-# Output the security group ID for use in EKS node groups
-output "sip_security_group_id" {
-  description = "Security group ID for SIP traffic"
-  value       = aws_security_group.sip_traffic.id
 }

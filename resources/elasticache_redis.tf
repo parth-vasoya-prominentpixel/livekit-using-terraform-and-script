@@ -1,10 +1,10 @@
-# ElastiCache Redis using official module - for existing EKS cluster
+# ElastiCache Redis using official module
 module "redis" {
   source  = "terraform-aws-modules/elasticache/aws"
   version = "~> 1.0"
 
   # Cluster configuration
-  replication_group_id = "${local.cluster_info.cluster_name}-redis"
+  replication_group_id = "${local.elasticache_name}-redis"
   description          = "Redis cluster for LiveKit session storage"
 
   # Node configuration
@@ -16,10 +16,10 @@ module "redis" {
   engine_version     = "7.0"
   num_cache_clusters = 1
 
-  # Network configuration - use existing VPC private subnets
-  subnet_group_name = "${local.cluster_info.cluster_name}-redis-subnet-group"
-  subnet_ids        = data.aws_subnets.private.ids
-  vpc_id            = data.aws_vpc.existing.id
+  # Network configuration - use VPC private subnets
+  subnet_group_name = "${local.elasticache_name}-redis-subnet-group"
+  subnet_ids        = module.vpc.private_subnets
+  vpc_id            = module.vpc.vpc_id
 
   # Security configuration
   at_rest_encryption_enabled = true
@@ -38,7 +38,7 @@ module "redis" {
       from_port                    = 6379
       to_port                      = 6379
       protocol                     = "tcp"
-      referenced_security_group_id = local.cluster_info.cluster_security_group_id
+      referenced_security_group_id = module.eks_al2023.cluster_primary_security_group_id
     }
   }
 
