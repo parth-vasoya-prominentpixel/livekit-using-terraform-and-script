@@ -52,11 +52,43 @@ module "eks_al2023" {
     }
   }
 
-  # Disable all access management to avoid conflicts
-  enable_cluster_creator_admin_permissions = false
-  manage_aws_auth_configmap = false
+  # Enable cluster creator admin permissions
+  enable_cluster_creator_admin_permissions = true
   
-  # Let EKS handle access naturally without explicit configuration
+  # Add access entries for both deployment role and current user
+  access_entries = {
+    # Deployment role access
+    deployment_role = {
+      kubernetes_groups = []
+      principal_arn     = var.deployment_role_arn
+      type             = "STANDARD"
+
+      policy_associations = {
+        admin = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = {
+            type = "cluster"
+          }
+        }
+      }
+    }
+    
+    # Current user/role access (for UI access)
+    current_user = {
+      kubernetes_groups = []
+      principal_arn     = data.aws_caller_identity.current.arn
+      type             = "STANDARD"
+
+      policy_associations = {
+        admin = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = {
+            type = "cluster"
+          }
+        }
+      }
+    }
+  }
 
   tags = local.tags
 }

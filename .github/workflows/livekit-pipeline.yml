@@ -191,28 +191,7 @@ jobs:
           
           terraform init -backend-config="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/backend.tfvars"
           
-          # Check if cluster exists and clean up access entries if needed
-          CLUSTER_NAME_FROM_TFVARS=$(grep 'cluster_name' ../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars | cut -d'"' -f2)
-          PREFIX=$(grep 'prefix_company' ../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars | cut -d'"' -f2)
-          FULL_CLUSTER_NAME="$PREFIX-eks-$CLUSTER_NAME_FROM_TFVARS-use1-${{ inputs.environment }}"
-          
-          echo "🔍 Checking for existing cluster: $FULL_CLUSTER_NAME"
-          
-          if aws eks describe-cluster --name "$FULL_CLUSTER_NAME" --region ${{ env.AWS_REGION }} >/dev/null 2>&1; then
-            echo "⚠️ Cluster exists, cleaning up access entries..."
-            
-            # List and delete existing access entries
-            aws eks list-access-entries --cluster-name "$FULL_CLUSTER_NAME" --region ${{ env.AWS_REGION }} --query 'accessEntries[]' --output text | while read -r entry; do
-              if [ -n "$entry" ]; then
-                echo "🗑️ Deleting access entry: $entry"
-                aws eks delete-access-entry --cluster-name "$FULL_CLUSTER_NAME" --principal-arn "$entry" --region ${{ env.AWS_REGION }} || true
-              fi
-            done
-            
-            echo "✅ Access entries cleaned up"
-          else
-            echo "ℹ️ No existing cluster found"
-          fi
+          echo "🚀 Proceeding with Terraform apply..."
           
           terraform plan \
             -var-file="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars" \
