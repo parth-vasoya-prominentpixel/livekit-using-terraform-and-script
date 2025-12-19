@@ -251,7 +251,15 @@ jobs:
         working-directory: scripts
         run: |
           chmod +x 02-setup-load-balancer.sh
-          CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}" ./02-setup-load-balancer.sh
+          
+          # Wait for cluster to be fully ready
+          echo "⏳ Waiting for cluster to be fully ready..."
+          sleep 60
+          
+          # Run the script with retry
+          CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}" \
+          AWS_REGION="${{ env.AWS_REGION }}" \
+          ./02-setup-load-balancer.sh
 
   # Step 5: Deploy LiveKit
   deploy-livekit:

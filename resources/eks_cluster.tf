@@ -52,23 +52,8 @@ module "eks_al2023" {
     }
   }
 
-  # Cluster access entries (replaces aws-auth ConfigMap)
-  access_entries = {
-    # Admin access for deployment role
-    deployment_role = {
-      kubernetes_groups = []
-      principal_arn     = var.deployment_role_arn
-
-      policy_associations = {
-        admin = {
-          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-          access_scope = {
-            type = "cluster"
-          }
-        }
-      }
-    }
-  }
+  # Enable cluster creator admin permissions (default behavior)
+  enable_cluster_creator_admin_permissions = true
 
   tags = local.tags
 }
