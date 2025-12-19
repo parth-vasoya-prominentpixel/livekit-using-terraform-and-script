@@ -89,8 +89,17 @@ The pipeline will pause at each step waiting for your approval:
 - **SIP Traffic**: Port 5060 TCP/UDP restricted to Twilio CIDRs only
 - **VPC**: Private subnets for workloads, public for load balancers
 - **IAM**: Least privilege with OIDC authentication
+- **Encryption**: AWS managed KMS key for EKS secrets encryption (cost-effective)
 
 ## 🚨 Important Notes
+
+### IAM Permissions Required
+If you encounter "Cluster not accessible" errors, run the IAM permissions fix:
+```bash
+chmod +x scripts/fix-iam-permissions.sh
+./scripts/fix-iam-permissions.sh
+```
+Or follow the detailed guide in `docs/IAM_PERMISSIONS_SETUP.md`
 
 ### Manual Approval Required
 - Every step requires explicit approval
@@ -110,10 +119,12 @@ The pipeline will pause at each step waiting for your approval:
 ## 📞 Support
 
 If you encounter any issues:
-1. Check the GitHub Actions logs for detailed error messages
-2. Verify your AWS permissions and OIDC role configuration
-3. Ensure all environment secrets are correctly set
-4. Review the Terraform state for any resource conflicts
+1. **EKS Connectivity Issues**: See `docs/EKS_CONNECTIVITY_TROUBLESHOOTING.md` for detailed troubleshooting
+2. Check the GitHub Actions logs for detailed error messages
+3. Verify your AWS permissions and OIDC role configuration
+4. Ensure all environment secrets are correctly set
+5. Use AWS CloudShell as a backup access method
+6. Review the Terraform state for any resource conflicts
 
 ## 🎉 Ready to Deploy!
 

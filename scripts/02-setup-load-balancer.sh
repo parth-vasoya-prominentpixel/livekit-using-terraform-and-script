@@ -52,21 +52,135 @@ for i in {1..5}; do
     fi
 done
 
-# Test cluster connectivity with extended retry
+# Test cluster connectivity with detailed logging and limited retries
 echo "🔍 Testing cluster connectivity..."
-for i in {1..10}; do
-    if timeout 30 kubectl get nodes >/dev/null 2>&1; then
-        echo "✅ Cluster is accessible"
-        kubectl get nodes --no-headers | wc -l | xargs echo "📊 Found nodes:"
+echo "📋 Starting connectivity tests with detailed logging..."
+
+# Get detailed cluster information first
+echo "🔍 Gathering cluster information..."
+CLUSTER_INFO=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" 2>/dev/null)
+if [ $? -eq 0 ]; then
+    CLUSTER_STATUS=$(echo "$CLUSTER_INFO" | jq -r '.cluster.status // "UNKNOWN"')
+    CLUSTER_ENDPOINT=$(echo "$CLUSTER_INFO" | jq -r '.cluster.endpoint // "UNKNOWN"')
+    CLUSTER_VERSION=$(echo "$CLUSTER_INFO" | jq -r '.cluster.version // "UNKNOWN"')
+    CLUSTER_PLATFORM_VERSION=$(echo "$CLUSTER_INFO" | jq -r '.cluster.platformVersion // "UNKNOWN"')
+    
+    echo "📋 Cluster Details:"
+    echo "   Name: $CLUSTER_NAME"
+    echo "   Status: $CLUSTER_STATUS"
+    echo "   Endpoint: $CLUSTER_ENDPOINT"
+    echo "   K8s Version: $CLUSTER_VERSION"
+    echo "   Platform Version: $CLUSTER_PLATFORM_VERSION"
+    
+    if [ "$CLUSTER_STATUS" != "ACTIVE" ]; then
+        echo "❌ Cluster is not ACTIVE (current: $CLUSTER_STATUS)"
+        echo "� Wauit for cluster to be ACTIVE before proceeding"
+        exit 1
+    fi
+else
+    echo "❌ Failed to describe cluster - check cluster name and permissions"
+    exit 1
+fi
+
+# Check current AWS identity
+echo "🔍 Checking AWS identity..."
+AWS_IDENTITY=$(aws sts get-caller-identity 2>/dev/null)
+if [ $? -eq 0 ]; then
+    AWS_ACCOUNT=$(echo "$AWS_IDENTITY" | jq -r '.Account // "UNKNOWN"')
+    AWS_USER_ARN=$(echo "$AWS_IDENTITY" | jq -r '.Arn // "UNKNOWN"')
+    echo "📋 AWS Identity:"
+    echo "   Account: $AWS_ACCOUNT"
+    echo "   ARN: $AWS_USER_ARN"
+else
+    echo "❌ Failed to get AWS identity - check credentials"
+    exit 1
+fi
+
+# Test endpoint connectivity
+echo "🔍 Testing cluster endpoint connectivity..."
+if [ "$CLUSTER_ENDPOINT" != "UNKNOWN" ] && [ -n "$CLUSTER_ENDPOINT" ]; then
+    echo "🌐 Testing HTTPS connectivity to: $CLUSTER_ENDPOINT"
+    
+    # Test with curl
+    CURL_OUTPUT=$(curl -k -s -w "HTTP_CODE:%{http_code};TIME:%{time_total}" --connect-timeout 15 --max-time 30 "$CLUSTER_ENDPOINT/healthz" 2>&1)
+    CURL_EXIT_CODE=$?
+    
+    if [ $CURL_EXIT_CODE -eq 0 ]; then
+        echo "✅ Endpoint is reachable via HTTPS"
+        echo "📋 Response: $CURL_OUTPUT"
+    else
+        echo "⚠️ Endpoint connectivity test failed"
+        echo "📋 Error: $CURL_OUTPUT"
+        echo "💡 This might indicate network or security group issues"
+    fi
+else
+    echo "❌ No valid cluster endpoint found"
+    exit 1
+fi
+
+# Now test kubectl connectivity with limited retries
+echo "🔍 Testing kubectl connectivity (max 3 attempts)..."
+for i in {1..3}; do
+    echo "🔄 Kubectl attempt $i/3..."
+    
+    # Show current kubectl context
+    echo "📋 Current kubectl context:"
+    kubectl config current-context 2>/dev/null || echo "   ❌ No current context set"
+    
+    # Show available contexts
+    echo "📋 Available contexts:"
+    kubectl config get-contexts 2>/dev/null || echo "   ❌ No contexts available"
+    
+    # Test kubectl with detailed output
+    echo "🔍 Testing 'kubectl get nodes' with timeout..."
+    KUBECTL_OUTPUT=$(timeout 30 kubectl get nodes -v=6 2>&1)
+    KUBECTL_EXIT_CODE=$?
+    
+    if [ $KUBECTL_EXIT_CODE -eq 0 ]; then
+        echo "✅ Cluster is accessible via kubectl!"
+        NODE_COUNT=$(echo "$KUBECTL_OUTPUT" | grep -v "^NAME" | grep -c "Ready\|NotReady" || echo "0")
+        echo "📊 Found $NODE_COUNT nodes:"
+        echo "$KUBECTL_OUTPUT" | head -10
         break
     else
-        echo "⚠️ Cluster not accessible, waiting 30 seconds... (attempt $i/10)"
-        sleep 30
-        if [ $i -eq 10 ]; then
-            echo "❌ Cluster is not accessible after 10 attempts"
-            echo "🔍 Debugging information:"
-            kubectl config current-context || echo "No current context"
-            kubectl config get-contexts || echo "No contexts available"
+        echo "❌ kubectl failed (exit code: $KUBECTL_EXIT_CODE)"
+        echo "📋 kubectl output (last 10 lines):"
+        echo "$KUBECTL_OUTPUT" | tail -10
+        
+        if [ $i -lt 3 ]; then
+            echo "⏳ Waiting 30 seconds before retry..."
+            sleep 30
+        else
+            echo "❌ Cluster is not accessible after 3 attempts"
+            echo ""
+            echo "🔍 FINAL DEBUGGING INFORMATION:"
+            echo "================================"
+            
+            # Show cluster details again
+            echo "📋 Cluster Status Check:"
+            aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query 'cluster.{Status:status,Endpoint:endpoint,CreatedAt:createdAt}' --output table 2>/dev/null || echo "   ❌ Could not describe cluster"
+            
+            # Show kubectl config
+            echo "📋 Kubectl Configuration:"
+            kubectl config view --minify 2>/dev/null || echo "   ❌ Could not view kubectl config"
+            
+            # Show network test
+            echo "📋 Network Connectivity:"
+            if [ -n "$CLUSTER_ENDPOINT" ]; then
+                echo "   Testing: $CLUSTER_ENDPOINT"
+                nc -zv $(echo "$CLUSTER_ENDPOINT" | sed 's|https://||' | cut -d':' -f1) 443 2>&1 || echo "   ❌ Port 443 not reachable"
+            fi
+            
+            echo ""
+            echo "💡 TROUBLESHOOTING STEPS:"
+            echo "========================"
+            echo "1. Check if cluster is fully created in AWS Console"
+            echo "2. Verify IAM permissions for EKS access"
+            echo "3. Check security groups allow HTTPS (443) access"
+            echo "4. Try accessing from AWS CloudShell:"
+            echo "   aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME"
+            echo "   kubectl get nodes"
+            echo ""
             exit 1
         fi
     fi

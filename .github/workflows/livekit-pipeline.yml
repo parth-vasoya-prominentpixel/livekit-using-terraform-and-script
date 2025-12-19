@@ -243,10 +243,18 @@ jobs:
 
       - name: Setup Tools
         run: |
+          # Install jq for JSON parsing
+          sudo apt-get update && sudo apt-get install -y jq netcat-openbsd
+          
+          # Install kubectl
           curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl"
           sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+          
+          # Install Helm
           curl -fsSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz | tar -xz
           sudo mv linux-amd64/helm /usr/local/bin/
+          
+          # Install eksctl
           curl -sLO "https://github.com/eksctl-io/eksctl/releases/download/v0.191.0/eksctl_Linux_amd64.tar.gz"
           tar -xzf eksctl_Linux_amd64.tar.gz
           sudo mv eksctl /usr/local/bin/
@@ -256,9 +264,34 @@ jobs:
         run: |
           chmod +x 02-setup-load-balancer.sh
           
-          # Wait for cluster to be fully ready
-          echo "⏳ Waiting for cluster to be fully ready..."
-          sleep 60
+          # Wait for cluster to be ready and verify status
+          echo "⏳ Waiting for cluster to be ready..."
+          echo "📋 Cluster: ${{ needs.terraform-apply.outputs.cluster-name }}"
+          
+          # Initial wait for cluster stabilization
+          sleep 90
+          
+          # Verify cluster is ACTIVE before proceeding (max 3 attempts)
+          echo "🔍 Verifying cluster status..."
+          for i in {1..3}; do
+            CLUSTER_STATUS=$(aws eks describe-cluster --name "${{ needs.terraform-apply.outputs.cluster-name }}" --region "${{ env.AWS_REGION }}" --query 'cluster.status' --output text 2>/dev/null || echo "UNKNOWN")
+            echo "📋 Cluster status: $CLUSTER_STATUS (attempt $i/3)"
+            
+            if [ "$CLUSTER_STATUS" = "ACTIVE" ]; then
+              echo "✅ Cluster is ACTIVE and ready"
+              break
+            elif [ "$CLUSTER_STATUS" = "CREATING" ]; then
+              echo "⏳ Cluster still creating, waiting 60 seconds..."
+              sleep 60
+            else
+              echo "❌ Unexpected cluster status: $CLUSTER_STATUS"
+              if [ $i -eq 3 ]; then
+                echo "❌ Cluster not ready after 3 attempts"
+                echo "💡 Check AWS Console for cluster status"
+                exit 1
+              fi
+            fi
+          done
           
           # Run the script with retry
           CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}" \
