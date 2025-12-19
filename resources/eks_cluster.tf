@@ -1,37 +1,50 @@
-# EKS Cluster with managed node groups - Latest version v21.0
+# EKS Cluster - Correct arguments for terraform-aws-modules/eks/aws v20.x
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
-  version = "~> 21.0"
+  version = "~> 20.0"
 
-  name               = local.cluster_name
-  kubernetes_version = var.cluster_version
+  cluster_name    = local.cluster_name
+  cluster_version = var.cluster_version
+  
+  cluster_endpoint_config = {
+    public_access = true
+  }
+  
+  enable_cluster_creator_admin_permissions = true
 
-  # EKS Addons - New format for v21.0
-  addons = {
-    coredns = {}
+  # EKS Addons
+  cluster_addons = {
+    coredns = {
+      most_recent = true
+    }
     eks-pod-identity-agent = {
       before_compute = true
+      most_recent    = true
     }
-    kube-proxy = {}
+    kube-proxy = {
+      most_recent = true
+    }
     vpc-cni = {
       before_compute = true
+      most_recent    = true
     }
-    aws-ebs-csi-driver = {}
+    aws-ebs-csi-driver = {
+      most_recent = true
+    }
   }
 
   vpc_id     = local.vpc_id
   subnet_ids = local.private_subnet_ids
 
-  # EKS Managed Node Groups - Based on official example
+  # EKS Managed Node Groups
   eks_managed_node_groups = {
     livekit_nodes = {
       # Using AL2023 for Kubernetes 1.34
       instance_types = ["t3.medium"]
       ami_type       = "AL2023_x86_64_STANDARD"
       
-      min_size = 1
-      max_size = 10
-      # This value is ignored after initial creation
+      min_size     = 1
+      max_size     = 10
       desired_size = 3
 
       # Attach SIP security group for Twilio traffic
@@ -44,8 +57,7 @@ module "eks" {
         "node-type"                  = "livekit-worker"
       }
 
-      # This is not required - demonstrates how to pass additional configuration to nodeadm
-      # Ref https://awslabs.github.io/amazon-eks-ami/nodeadm/doc/api/
+      # AL2023 nodeadm configuration
       cloudinit_pre_nodeadm = [{
         content_type = "application/node.eks.aws"
         content      = <<-EOT
@@ -59,6 +71,35 @@ module "eks" {
         EOT
       }]
     }
+  }
+
+  # Access entries to fix access issues
+  access_entries = {
+    # Current user/role access
+    cluster_creator = {
+      principal_arn = data.aws_caller_identity.current.arn
+      policy_associations = {
+        admin = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = {
+            type = "cluster"
+          }
+        }
+      }
+    }
+    
+    # Deployment role access (if provided)
+    deployment_role = var.deployment_role_arn != "" ? {
+      principal_arn = var.deployment_role_arn
+      policy_associations = {
+        admin = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = {
+            type = "cluster"
+          }
+        }
+      }
+    } : null
   }
 
   tags = local.tags
