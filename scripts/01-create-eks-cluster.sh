@@ -10,7 +10,7 @@ echo "🚀 Creating EKS cluster with eksctl..."
 # Cluster configuration
 CLUSTER_NAME="livekit-cluster-v2"
 REGION="us-east-1"
-K8S_VERSION="1.34"
+K8S_VERSION="1.33"
 NODE_TYPE="t3.medium"
 MIN_NODES=2
 MAX_NODES=3

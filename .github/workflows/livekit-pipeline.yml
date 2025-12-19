@@ -1,0 +1,286 @@
+name: 🚀 LiveKit Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'deploy'
+        type: choice
+        options:
+          - deploy
+          - destroy
+      environment:
+        description: 'Environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - uat
+          - prod
+
+env:
+  AWS_REGION: us-east-1
+  CLUSTER_NAME: livekit-cluster-v2
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: 🚀 Deploy LiveKit Infrastructure
+    runs-on: ubuntu-latest
+    if: ${{ inputs.action == 'deploy' }}
+    environment: livekit-poc-${{ inputs.environment }}-deploy
+    
+    steps:
+      - name: 📋 Manual Approval - Deploy Everything
+        run: |
+          echo "🤔 Manual approval required for COMPLETE DEPLOYMENT"
+          echo "📋 This will create:"
+          echo "   - EKS Cluster (K8s 1.30, 3 nodes)"
+          echo "   - Redis cluster"
+          echo "   - Load Balancer Controller"
+          echo "   - LiveKit application"
+          echo "🌍 Environment: ${{ inputs.environment }}"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          role-session-name: GitHubActions-LiveKit-Deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Tools
+        run: |
+          # Install eksctl
+          curl -sLO "https://github.com/eksctl-io/eksctl/releases/download/v0.191.0/eksctl_Linux_amd64.tar.gz"
+          tar -xzf eksctl_Linux_amd64.tar.gz
+          sudo mv eksctl /usr/local/bin/
+          
+          # Install Terraform
+          wget -q https://releases.hashicorp.com/terraform/1.10.3/terraform_1.10.3_linux_amd64.zip
+          unzip -q terraform_1.10.3_linux_amd64.zip
+          sudo mv terraform /usr/local/bin/
+          
+          # Install kubectl
+          curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+          
+          # Install Helm
+          curl -fsSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz | tar -xz
+          sudo mv linux-amd64/helm /usr/local/bin/
+
+      - name: 1️⃣ Create EKS Cluster
+        run: |
+          echo "🚀 Creating EKS cluster..."
+          
+          eksctl create cluster \
+            --name ${{ env.CLUSTER_NAME }} \
+            --region ${{ env.AWS_REGION }} \
+            --version 1.30 \
+            --nodegroup-name livekit-nodes \
+            --instance-types t3.medium \
+            --nodes 3 \
+            --nodes-min 2 \
+            --nodes-max 5 \
+            --managed \
+            --with-oidc \
+            --enable-ssm \
+            --asg-access \
+            --external-dns-access \
+            --full-ecr-access \
+            --alb-ingress-access
+          
+          echo "✅ EKS cluster created!"
+
+      - name: 2️⃣ Deploy Redis & Security Groups
+        working-directory: resources
+        run: |
+          echo "🔧 Creating cluster info..."
+          VPC_ID=$(aws eks describe-cluster --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }} --query 'cluster.resourcesVpcConfig.vpcId' --output text)
+          CLUSTER_SG=$(aws eks describe-cluster --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }} --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' --output text)
+          
+          cat > terraform-cluster-info.json << EOF
+          {
+            "cluster_name": "${{ env.CLUSTER_NAME }}",
+            "vpc_id": "$VPC_ID",
+            "cluster_security_group_id": "$CLUSTER_SG",
+            "region": "${{ env.AWS_REGION }}"
+          }
+          EOF
+          
+          echo "🔧 Deploying Redis..."
+          terraform init -backend-config="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/backend.tfvars"
+          terraform apply \
+            -var-file="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars" \
+            -var="deployment_role_arn=${{ secrets.DEPLOYMENT_ROLE_ARN }}" \
+            -auto-approve
+          
+          echo "✅ Redis deployed!"
+
+      - name: 3️⃣ Setup Load Balancer Controller
+        run: |
+          echo "⚖️ Setting up Load Balancer Controller..."
+          
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
+          
+          # Create IAM policy
+          curl -O https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.7.2/docs/install/iam_policy.json
+          aws iam create-policy \
+            --policy-name AWSLoadBalancerControllerIAMPolicy \
+            --policy-document file://iam_policy.json || true
+          
+          # Create service account
+          eksctl create iamserviceaccount \
+            --cluster=${{ env.CLUSTER_NAME }} \
+            --namespace=kube-system \
+            --name=aws-load-balancer-controller \
+            --role-name AmazonEKSLoadBalancerControllerRole \
+            --attach-policy-arn=arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/AWSLoadBalancerControllerIAMPolicy \
+            --approve \
+            --region=${{ env.AWS_REGION }}
+          
+          # Install controller
+          helm repo add eks https://aws.github.io/eks-charts
+          helm repo update
+          helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+            -n kube-system \
+            --set clusterName=${{ env.CLUSTER_NAME }} \
+            --set serviceAccount.create=false \
+            --set serviceAccount.name=aws-load-balancer-controller \
+            --set region=${{ env.AWS_REGION }}
+          
+          kubectl wait --for=condition=available --timeout=300s deployment/aws-load-balancer-controller -n kube-system
+          echo "✅ Load Balancer Controller ready!"
+
+      - name: 4️⃣ Deploy LiveKit
+        working-directory: resources
+        run: |
+          echo "🎥 Deploying LiveKit..."
+          
+          # Get Redis endpoint
+          REDIS_ENDPOINT=$(terraform output -raw redis_cluster_endpoint)
+          
+          # Create namespace
+          kubectl create namespace livekit --dry-run=client -o yaml | kubectl apply -f -
+          
+          # Add LiveKit Helm repo
+          helm repo add livekit https://livekit.github.io/charts
+          helm repo update
+          
+          # Update Redis endpoint in values file
+          cd ..
+          sed -i "s|redis:.*|redis: \"$REDIS_ENDPOINT\"|g" livekit-values.yaml
+          
+          # Deploy LiveKit
+          helm upgrade --install livekit livekit/livekit \
+            -n livekit \
+            -f livekit-values.yaml \
+            --wait --timeout=10m
+          
+          echo "📊 Deployment Status:"
+          kubectl get pods -n livekit
+          kubectl get svc -n livekit
+          
+          echo "✅ LiveKit deployed successfully!"
+          echo "🎉 DEPLOYMENT COMPLETE!"
+
+  destroy:
+    name: 🗑️ Destroy LiveKit Infrastructure
+    runs-on: ubuntu-latest
+    if: ${{ inputs.action == 'destroy' }}
+    environment: livekit-poc-${{ inputs.environment }}-destroy
+    
+    steps:
+      - name: 📋 Manual Approval - Destroy Everything
+        run: |
+          echo "🤔 Manual approval required for COMPLETE DESTRUCTION"
+          echo "⚠️  DANGER: This will permanently delete ALL resources!"
+          echo "📋 Resources to be destroyed:"
+          echo "   - LiveKit application"
+          echo "   - Load Balancer Controller"
+          echo "   - Redis cluster"
+          echo "   - EKS Cluster and VPC"
+          echo "🌍 Environment: ${{ inputs.environment }}"
+          echo "🚨 ALL DATA WILL BE PERMANENTLY LOST!"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          role-session-name: GitHubActions-LiveKit-Destroy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Tools
+        run: |
+          curl -sLO "https://github.com/eksctl-io/eksctl/releases/download/v0.191.0/eksctl_Linux_amd64.tar.gz"
+          tar -xzf eksctl_Linux_amd64.tar.gz
+          sudo mv eksctl /usr/local/bin/
+          
+          wget -q https://releases.hashicorp.com/terraform/1.10.3/terraform_1.10.3_linux_amd64.zip
+          unzip -q terraform_1.10.3_linux_amd64.zip
+          sudo mv terraform /usr/local/bin/
+          
+          curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+
+      - name: 1️⃣ Remove LiveKit & Load Balancer
+        run: |
+          echo "🗑️ Removing LiveKit and Load Balancer..."
+          
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }} || true
+          
+          # Remove LiveKit
+          kubectl delete namespace livekit --ignore-not-found=true --timeout=120s || true
+          
+          # Remove Load Balancer Controller
+          helm uninstall aws-load-balancer-controller -n kube-system || true
+          eksctl delete iamserviceaccount \
+            --cluster=${{ env.CLUSTER_NAME }} \
+            --namespace=kube-system \
+            --name=aws-load-balancer-controller \
+            --region=${{ env.AWS_REGION }} || true
+          
+          echo "✅ Applications removed!"
+
+      - name: 2️⃣ Remove Redis & Security Groups
+        working-directory: resources
+        run: |
+          echo "🗑️ Removing Redis..."
+          
+          # Create cluster info
+          cat > terraform-cluster-info.json << EOF
+          {
+            "cluster_name": "${{ env.CLUSTER_NAME }}",
+            "vpc_id": "$(aws eks describe-cluster --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }} --query 'cluster.resourcesVpcConfig.vpcId' --output text 2>/dev/null || echo '')",
+            "cluster_security_group_id": "$(aws eks describe-cluster --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }} --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' --output text 2>/dev/null || echo '')",
+            "region": "${{ env.AWS_REGION }}"
+          }
+          EOF
+          
+          terraform init -backend-config="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/backend.tfvars"
+          terraform destroy \
+            -var-file="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars" \
+            -var="deployment_role_arn=${{ secrets.DEPLOYMENT_ROLE_ARN }}" \
+            -auto-approve
+          
+          echo "✅ Redis removed!"
+
+      - name: 3️⃣ Remove EKS Cluster
+        run: |
+          echo "🗑️ Removing EKS cluster..."
+          
+          eksctl delete cluster --name ${{ env.CLUSTER_NAME }} --region ${{ env.AWS_REGION }}
+          
+          echo "✅ EKS cluster removed!"
+          echo "🎉 DESTRUCTION COMPLETE!"
