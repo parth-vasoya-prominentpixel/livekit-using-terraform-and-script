@@ -74,15 +74,8 @@ module "eks_al2023" {
     }
   } : {}
 
-  # KMS Configuration - Use AWS managed KMS key (more cost-effective)
-  # AWS managed keys are free and automatically rotated
-  create_kms_key = false
-  
-  # Alternative: Customer-managed KMS key with 7-day deletion period
-  # Uncomment the lines below and comment out create_kms_key = false if you prefer customer-managed KMS
-  # create_kms_key = true
-  # kms_key_deletion_window_in_days = 7
-  # kms_key_description = "EKS cluster encryption key for ${local.eks_name}"
+  # Use default encryption configuration (creates customer-managed KMS key)
+  # For cost optimization in production, consider using AWS managed keys
 
   tags = local.tags
 }
