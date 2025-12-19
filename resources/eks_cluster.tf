@@ -65,12 +65,20 @@ module "eks_al2023" {
   # Enable cluster creator admin permissions
   enable_cluster_creator_admin_permissions = true
   
-  # Additional access entries for GitHub Actions and deployment role
+  # Access entries - using cluster-admin instead of system:masters
   access_entries = var.deployment_role_arn != "" ? {
     deployment_role = {
-      kubernetes_groups = ["system:masters"]
+      kubernetes_groups = []
       principal_arn     = var.deployment_role_arn
       type             = "STANDARD"
+      policy_associations = {
+        admin = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = {
+            type = "cluster"
+          }
+        }
+      }
     }
   } : {}
 
