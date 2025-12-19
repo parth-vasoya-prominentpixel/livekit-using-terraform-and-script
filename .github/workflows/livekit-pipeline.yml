@@ -193,6 +193,17 @@ jobs:
           
           echo "🚀 Proceeding with Terraform apply..."
           
+          # Clean up existing access entries to prevent conflicts
+          CLUSTER_NAME_FROM_TFVARS=$(grep 'cluster_name' ../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars | cut -d'"' -f2)
+          PREFIX=$(grep 'prefix_company' ../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars | cut -d'"' -f2)
+          FULL_CLUSTER_NAME="$PREFIX-eks-$CLUSTER_NAME_FROM_TFVARS-use1-${{ inputs.environment }}"
+          
+          echo "🧹 Running access entry cleanup..."
+          cd ../scripts
+          chmod +x cleanup-access-entries.sh
+          CLUSTER_NAME="$FULL_CLUSTER_NAME" AWS_REGION="${{ env.AWS_REGION }}" ./cleanup-access-entries.sh
+          cd ../resources
+          
           terraform plan \
             -var-file="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars" \
             -var="deployment_role_arn=${{ secrets.DEPLOYMENT_ROLE_ARN }}" \
