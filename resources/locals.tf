@@ -58,9 +58,9 @@ locals {
   cluster_name = local.eks_name
   redis_name   = local.elasticache_name  # For backward compatibility
 
-  # VPC and subnet configuration (using new VPC)
-  vpc_id             = module.vpc.vpc_id
-  private_subnet_ids = module.vpc.private_subnets
-  public_subnet_ids  = module.vpc.public_subnets
-  subnet_ids         = module.vpc.private_subnets
+  # VPC and subnet configuration (using existing EKS cluster VPC)
+  vpc_id             = try(data.aws_vpc.existing.id, "")
+  private_subnet_ids = try(data.aws_subnets.private.ids, [])
+  public_subnet_ids  = try(data.aws_subnets.public.ids, [])
+  subnet_ids         = try(data.aws_subnets.private.ids, [])
 }

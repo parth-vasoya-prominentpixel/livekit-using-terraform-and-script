@@ -1,4 +1,4 @@
-name: LiveKit EKS Manual Deployment Pipeline
+name: LiveKit EKS Hybrid Deployment (eksctl + Terraform)
 
 on:
   workflow_dispatch:
@@ -19,11 +19,10 @@ on:
         type: choice
         options:
           - all
-          - prerequisites
-          - terraform-plan
-          - terraform-apply
-          - load-balancer
-          - livekit
+          - create-cluster
+          - deploy-resources
+          - setup-load-balancer
+          - deploy-livekit
           - destroy
 
 env:
@@ -38,21 +37,27 @@ permissions:
   contents: read
 
 jobs:
-  # Step 1: Prerequisites Check
-  prerequisites:
-    name: 🔍 Step 1 - Prerequisites Check
+  # Step 1: Create EKS Cluster with eksctl
+  create-eks-cluster:
+    name: 🚀 Step 1 - Create EKS Cluster (eksctl)
     runs-on: ubuntu-latest
-    if: ${{ inputs.step == 'all' || inputs.step == 'prerequisites' }}
+    if: ${{ inputs.step == 'all' || inputs.step == 'create-cluster' }}
     environment: 
-      name: ${{ inputs.environment }}-prerequisites
+      name: ${{ inputs.environment }}-create-cluster
     outputs:
-      tools-status: ${{ steps.run-script.outputs.status }}
+      cluster-name: ${{ steps.create-cluster.outputs.cluster_name }}
     
     steps:
-      - name: 📋 Manual Approval - Prerequisites Check
+      - name: 📋 Manual Approval - Create EKS Cluster
         run: |
-          echo "🤔 Manual approval required for Prerequisites Check"
-          echo "📋 This step will check and install required tools"
+          echo "🤔 Manual approval required for EKS Cluster Creation"
+          echo "⚠️  WARNING: This will create AWS resources that may incur costs!"
+          echo "📋 Resources to be created:"
+          echo "   - EKS Cluster: livekit-cluster-v2"
+          echo "   - Kubernetes Version: 1.34"
+          echo "   - Node Type: t3.medium (3 nodes: 2 min, 3 max)"
+          echo "   - VPC and networking (auto-created by eksctl)"
+          echo "   - OIDC provider, IAM roles, security groups"
           echo "🌍 Environment: ${{ inputs.environment }}"
 
       - name: Checkout code
@@ -62,62 +67,61 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          role-session-name: GitHubActions-LiveKit-Prerequisites-${{ github.run_id }}
+          role-session-name: GitHubActions-LiveKit-EKS-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Install Prerequisites
-        id: run-script
+      - name: Setup Tools
         run: |
-          echo "🔍 Installing prerequisites..."
-          
-          # Install AWS CLI (already available in GitHub Actions)
-          aws --version
-          
-          # Install Terraform
-          wget -q https://releases.hashicorp.com/terraform/${{ env.TERRAFORM_VERSION }}/terraform_${{ env.TERRAFORM_VERSION }}_linux_amd64.zip
-          unzip -q terraform_${{ env.TERRAFORM_VERSION }}_linux_amd64.zip
-          sudo mv terraform /usr/local/bin/
-          terraform version
-          
-          # Install kubectl
-          curl -LO "https://dl.k8s.io/release/${{ env.KUBECTL_VERSION }}/bin/linux/amd64/kubectl"
-          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-          kubectl version --client
-          
-          # Install Helm
-          curl -fsSL https://get.helm.sh/helm-${{ env.HELM_VERSION }}-linux-amd64.tar.gz | tar -xz
-          sudo mv linux-amd64/helm /usr/local/bin/
-          helm version
-          
           # Install eksctl
           curl -sLO "https://github.com/eksctl-io/eksctl/releases/download/v${{ env.EKSCTL_VERSION }}/eksctl_Linux_amd64.tar.gz"
           tar -xzf eksctl_Linux_amd64.tar.gz
           sudo mv eksctl /usr/local/bin/
           eksctl version
           
-          # Install jq (already available)
-          jq --version
+          # Install kubectl
+          curl -LO "https://dl.k8s.io/release/${{ env.KUBECTL_VERSION }}/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+          kubectl version --client
           
-          echo "status=success" >> $GITHUB_OUTPUT
-          echo "✅ Prerequisites installed successfully!"
+          # Install jq
+          sudo apt-get update && sudo apt-get install -y jq
 
-  # Step 2: Terraform Plan
-  terraform-plan:
-    name: 📋 Step 2 - Terraform Plan
+      - name: Create EKS Cluster
+        id: create-cluster
+        working-directory: scripts
+        run: |
+          echo "🚀 Creating EKS cluster with eksctl..."
+          chmod +x 01-create-eks-cluster.sh
+          ./01-create-eks-cluster.sh
+          
+          # Get cluster name from the created file
+          CLUSTER_NAME=$(jq -r '.cluster_name' ../terraform-cluster-info.json)
+          echo "cluster_name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
+          
+          echo "✅ EKS cluster created successfully!"
+          echo "🏷️ Cluster Name: $CLUSTER_NAME"
+
+  # Step 2: Deploy Redis and Security Groups with Terraform
+  deploy-additional-resources:
+    name: 🔧 Step 2 - Deploy Redis & Security Groups
     runs-on: ubuntu-latest
-    needs: [prerequisites]
-    if: ${{ always() && (needs.prerequisites.result == 'success' || inputs.step == 'terraform-plan') }}
+    needs: [create-eks-cluster]
+    if: ${{ always() && (needs.create-eks-cluster.result == 'success' || inputs.step == 'deploy-resources') }}
     environment: 
-      name: ${{ inputs.environment }}-terraform-plan
+      name: ${{ inputs.environment }}-terraform
     outputs:
-      plan-status: ${{ steps.terraform-plan.outputs.status }}
+      redis-endpoint: ${{ steps.get-outputs.outputs.redis_endpoint }}
     
     steps:
-      - name: 📋 Manual Approval - Terraform Plan
+      - name: 📋 Manual Approval - Deploy Additional Resources
         run: |
-          echo "🤔 Manual approval required for Terraform Plan"
-          echo "📋 This step will create Terraform execution plan"
+          echo "🤔 Manual approval required for Additional Resources"
+          echo "📋 Resources to be created:"
+          echo "   - ElastiCache Redis cluster"
+          echo "   - Security Groups for SIP traffic (port 5060 from Twilio only)"
+          echo "   - Attach SIP security group to EKS nodes"
           echo "🌍 Environment: ${{ inputs.environment }}"
+          echo "🏷️ EKS Cluster: ${{ needs.create-eks-cluster.outputs.cluster-name || 'livekit-cluster-v2' }}"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -126,16 +130,34 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          role-session-name: GitHubActions-LiveKit-Plan-${{ github.run_id }}
+          role-session-name: GitHubActions-LiveKit-Terraform-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
+      - name: Setup Tools
+        run: |
+          # Install Terraform
+          wget -q https://releases.hashicorp.com/terraform/${{ env.TERRAFORM_VERSION }}/terraform_${{ env.TERRAFORM_VERSION }}_linux_amd64.zip
+          unzip -q terraform_${{ env.TERRAFORM_VERSION }}_linux_amd64.zip
+          sudo mv terraform /usr/local/bin/
+          terraform version
+          
+          # Install jq
+          sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Terraform Plan
-        id: terraform-plan
+      - name: Create cluster info file (if not from previous step)
+        if: ${{ inputs.step == 'deploy-resources' }}
+        run: |
+          # Create cluster info file for standalone resource deployment
+          cat > terraform-cluster-info.json << EOF
+          {
+            "cluster_name": "livekit-cluster-v2",
+            "vpc_id": "$(aws eks describe-cluster --name livekit-cluster-v2 --region ${{ env.AWS_REGION }} --query 'cluster.resourcesVpcConfig.vpcId' --output text)",
+            "cluster_security_group_id": "$(aws eks describe-cluster --name livekit-cluster-v2 --region ${{ env.AWS_REGION }} --query 'cluster.resourcesVpcConfig.clusterSecurityGroupId' --output text)",
+            "region": "${{ env.AWS_REGION }}"
+          }
+          EOF
+
+      - name: Deploy Additional Resources
         working-directory: resources
         run: |
           echo "🔧 Initializing Terraform..."
@@ -150,93 +172,38 @@ jobs:
             -var="deployment_role_arn=${{ secrets.DEPLOYMENT_ROLE_ARN }}" \
             -out=tfplan
           
-          echo "status=success" >> $GITHUB_OUTPUT
-          echo "✅ Terraform plan created successfully!"
-
-  # Step 3: Terraform Apply
-  terraform-apply:
-    name: 🚀 Step 3 - Deploy Infrastructure
-    runs-on: ubuntu-latest
-    needs: [terraform-plan]
-    if: ${{ always() && (needs.terraform-plan.result == 'success' || inputs.step == 'terraform-apply') && inputs.step != 'destroy' }}
-    environment: 
-      name: ${{ inputs.environment }}-terraform-apply
-    outputs:
-      apply-status: ${{ steps.terraform-apply.outputs.status }}
-      cluster-name: ${{ steps.get-outputs.outputs.cluster_name }}
-      redis-endpoint: ${{ steps.get-outputs.outputs.redis_endpoint }}
-      vpc-id: ${{ steps.get-outputs.outputs.vpc_id }}
-    
-    steps:
-      - name: 📋 Manual Approval - Infrastructure Deployment
-        run: |
-          echo "🤔 Manual approval required for Infrastructure Deployment"
-          echo "⚠️  WARNING: This will create AWS resources that may incur costs!"
-          echo "📋 Resources to be created:"
-          echo "   - EKS Cluster: lp-eks-livekit-use1-${{ inputs.environment }}"
-          echo "   - VPC and networking"
-          echo "   - ElastiCache Redis"
-          echo "   - Security Groups"
-          echo "🌍 Environment: ${{ inputs.environment }}"
-
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          role-session-name: GitHubActions-LiveKit-Apply-${{ github.run_id }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-
-      - name: Apply Infrastructure
-        id: terraform-apply
-        working-directory: resources
-        run: |
-          echo "🔧 Initializing Terraform..."
-          terraform init -backend-config="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/backend.tfvars"
+          echo "🚀 Applying additional resources..."
+          terraform apply tfplan
           
-          echo "🚀 Applying infrastructure..."
-          terraform apply \
-            -var-file="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars" \
-            -var="deployment_role_arn=${{ secrets.DEPLOYMENT_ROLE_ARN }}" \
-            -auto-approve
+          echo "✅ Additional resources deployed successfully!"
+
+      - name: Attach SIP Security Group
+        working-directory: scripts
+        run: |
+          echo "🔒 Attaching SIP security group to EKS nodes..."
+          chmod +x 02-attach-sip-security-group.sh
+          ./02-attach-sip-security-group.sh
           
-          echo "status=success" >> $GITHUB_OUTPUT
-          echo "✅ Infrastructure deployed successfully!"
+          echo "✅ SIP security group attached successfully!"
 
       - name: Get Terraform Outputs
         id: get-outputs
         working-directory: resources
         run: |
           echo "📊 Getting Terraform outputs..."
-          CLUSTER_NAME=$(terraform output -raw cluster_name)
           REDIS_ENDPOINT=$(terraform output -raw redis_cluster_endpoint)
-          VPC_ID=$(terraform output -raw vpc_id)
           
-          echo "cluster_name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
           echo "redis_endpoint=$REDIS_ENDPOINT" >> $GITHUB_OUTPUT
-          echo "vpc_id=$VPC_ID" >> $GITHUB_OUTPUT
-          
-          echo "🏷️ Cluster Name: $CLUSTER_NAME"
           echo "🔗 Redis Endpoint: $REDIS_ENDPOINT"
-          echo "🏠 VPC ID: $VPC_ID"
 
-  # Step 4: Load Balancer Controller
+  # Step 3: Setup Load Balancer Controller
   setup-load-balancer:
-    name: ⚖️ Step 4 - Setup Load Balancer Controller
+    name: ⚖️ Step 3 - Setup Load Balancer Controller
     runs-on: ubuntu-latest
-    needs: [terraform-apply]
-    if: ${{ always() && (needs.terraform-apply.result == 'success' || inputs.step == 'load-balancer') }}
+    needs: [create-eks-cluster, deploy-additional-resources]
+    if: ${{ always() && (needs.deploy-additional-resources.result == 'success' || inputs.step == 'setup-load-balancer') }}
     environment: 
       name: ${{ inputs.environment }}-load-balancer
-    outputs:
-      lb-status: ${{ steps.setup-lb.outputs.status }}
     
     steps:
       - name: 📋 Manual Approval - Load Balancer Controller
@@ -244,7 +211,7 @@ jobs:
           echo "🤔 Manual approval required for Load Balancer Controller Setup"
           echo "📋 This step will install AWS Load Balancer Controller"
           echo "🌍 Environment: ${{ inputs.environment }}"
-          echo "🏷️ Cluster: ${{ needs.terraform-apply.outputs.cluster-name }}"
+          echo "🏷️ Cluster: ${{ needs.create-eks-cluster.outputs.cluster-name || 'livekit-cluster-v2' }}"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -272,19 +239,22 @@ jobs:
           sudo mv eksctl /usr/local/bin/
 
       - name: Setup Load Balancer Controller
-        id: setup-lb
         run: |
           echo "⚖️ Setting up AWS Load Balancer Controller..."
           
-          CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
-          VPC_ID="${{ needs.terraform-apply.outputs.vpc-id }}"
+          CLUSTER_NAME="${{ needs.create-eks-cluster.outputs.cluster-name || 'livekit-cluster-v2' }}"
           
           # Configure kubectl
           aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name "$CLUSTER_NAME"
           kubectl get nodes
           
-          # Create IAM OIDC identity provider
-          eksctl utils associate-iam-oidc-provider --region=${{ env.AWS_REGION }} --cluster=$CLUSTER_NAME --approve
+          # Download IAM policy for Load Balancer Controller
+          curl -O https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.7.2/docs/install/iam_policy.json
+          
+          # Create IAM policy
+          aws iam create-policy \
+            --policy-name AWSLoadBalancerControllerIAMPolicy \
+            --policy-document file://iam_policy.json || true
           
           # Create service account for Load Balancer Controller
           eksctl create iamserviceaccount \
@@ -292,7 +262,7 @@ jobs:
             --namespace=kube-system \
             --name=aws-load-balancer-controller \
             --role-name AmazonEKSLoadBalancerControllerRole \
-            --attach-policy-arn=arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/lp-eks-livekit-use1-dev-AWSLoadBalancerControllerIAMPolicy \
+            --attach-policy-arn=arn:aws:iam::$(aws sts get-caller-identity --query Account --output text):policy/AWSLoadBalancerControllerIAMPolicy \
             --approve \
             --region=${{ env.AWS_REGION }}
           
@@ -305,25 +275,21 @@ jobs:
             --set clusterName=$CLUSTER_NAME \
             --set serviceAccount.create=false \
             --set serviceAccount.name=aws-load-balancer-controller \
-            --set region=${{ env.AWS_REGION }} \
-            --set vpcId=$VPC_ID
+            --set region=${{ env.AWS_REGION }}
           
           # Wait for deployment
           kubectl wait --for=condition=available --timeout=300s deployment/aws-load-balancer-controller -n kube-system
           
-          echo "status=success" >> $GITHUB_OUTPUT
           echo "✅ Load Balancer Controller setup completed!"
 
-  # Step 5: LiveKit Deployment
+  # Step 4: Deploy LiveKit
   deploy-livekit:
-    name: 🎥 Step 5 - Deploy LiveKit
+    name: 🎥 Step 4 - Deploy LiveKit
     runs-on: ubuntu-latest
-    needs: [terraform-apply, setup-load-balancer]
-    if: ${{ always() && (needs.setup-load-balancer.result == 'success' || inputs.step == 'livekit') }}
+    needs: [create-eks-cluster, deploy-additional-resources, setup-load-balancer]
+    if: ${{ always() && (needs.setup-load-balancer.result == 'success' || inputs.step == 'deploy-livekit') }}
     environment: 
       name: ${{ inputs.environment }}-livekit
-    outputs:
-      livekit-status: ${{ steps.deploy-livekit.outputs.status }}
     
     steps:
       - name: 📋 Manual Approval - LiveKit Deployment
@@ -331,8 +297,8 @@ jobs:
           echo "🤔 Manual approval required for LiveKit Deployment"
           echo "📋 This step will deploy LiveKit application"
           echo "🌍 Environment: ${{ inputs.environment }}"
-          echo "🏷️ Cluster: ${{ needs.terraform-apply.outputs.cluster-name }}"
-          echo "🔗 Redis: ${{ needs.terraform-apply.outputs.redis-endpoint }}"
+          echo "🏷️ Cluster: ${{ needs.create-eks-cluster.outputs.cluster-name || 'livekit-cluster-v2' }}"
+          echo "🔗 Redis: ${{ needs.deploy-additional-resources.outputs.redis-endpoint }}"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -355,12 +321,11 @@ jobs:
           sudo mv linux-amd64/helm /usr/local/bin/
 
       - name: Deploy LiveKit
-        id: deploy-livekit
         run: |
           echo "🎥 Deploying LiveKit..."
           
-          CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
-          REDIS_ENDPOINT="${{ needs.terraform-apply.outputs.redis-endpoint }}"
+          CLUSTER_NAME="${{ needs.create-eks-cluster.outputs.cluster-name || 'livekit-cluster-v2' }}"
+          REDIS_ENDPOINT="${{ needs.deploy-additional-resources.outputs.redis-endpoint }}"
           
           # Configure kubectl
           aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name "$CLUSTER_NAME"
@@ -386,18 +351,15 @@ jobs:
           kubectl get svc -n livekit
           kubectl get ingress -n livekit
           
-          echo "status=success" >> $GITHUB_OUTPUT
           echo "✅ LiveKit deployed successfully!"
 
-  # Step 6: Destroy Infrastructure
+  # Step 5: Destroy Infrastructure
   destroy-infrastructure:
-    name: 🗑️ Step 6 - Destroy Infrastructure
+    name: 🗑️ Destroy Infrastructure
     runs-on: ubuntu-latest
     if: ${{ inputs.step == 'destroy' }}
     environment: 
       name: ${{ inputs.environment }}-destroy
-    outputs:
-      destroy-status: ${{ steps.terraform-destroy.outputs.status }}
     
     steps:
       - name: 📋 Manual Approval - Destroy Infrastructure
@@ -422,44 +384,43 @@ jobs:
           role-session-name: GitHubActions-LiveKit-Destroy-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: ${{ env.TERRAFORM_VERSION }}
-
-      - name: Setup kubectl
+      - name: Setup Tools
         run: |
+          # Install Terraform
+          wget -q https://releases.hashicorp.com/terraform/${{ env.TERRAFORM_VERSION }}/terraform_${{ env.TERRAFORM_VERSION }}_linux_amd64.zip
+          unzip -q terraform_${{ env.TERRAFORM_VERSION }}_linux_amd64.zip
+          sudo mv terraform /usr/local/bin/
+          
+          # Install eksctl
+          curl -sLO "https://github.com/eksctl-io/eksctl/releases/download/v${{ env.EKSCTL_VERSION }}/eksctl_Linux_amd64.tar.gz"
+          tar -xzf eksctl_Linux_amd64.tar.gz
+          sudo mv eksctl /usr/local/bin/
+          
+          # Install kubectl
           curl -LO "https://dl.k8s.io/release/${{ env.KUBECTL_VERSION }}/bin/linux/amd64/kubectl"
           sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
 
-      - name: Cleanup Kubernetes Resources
-        continue-on-error: true
-        working-directory: resources
-        run: |
-          echo "🗑️ Cleaning up Kubernetes resources..."
-          
-          terraform init -backend-config="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/backend.tfvars"
-          
-          CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "")
-          
-          if [ -n "$CLUSTER_NAME" ]; then
-            echo "Found cluster: $CLUSTER_NAME"
-            aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name "$CLUSTER_NAME" || true
-            kubectl delete namespace livekit --ignore-not-found=true --timeout=60s || true
-            helm uninstall aws-load-balancer-controller -n kube-system || true
-            sleep 30
-          fi
-
-      - name: Destroy Infrastructure
-        id: terraform-destroy
-        working-directory: resources
+      - name: Cleanup and Destroy
         run: |
           echo "🗑️ Destroying infrastructure..."
           
+          CLUSTER_NAME="livekit-cluster-v2"
+          
+          # Cleanup Kubernetes resources first
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name "$CLUSTER_NAME" || true
+          kubectl delete namespace livekit --ignore-not-found=true --timeout=60s || true
+          helm uninstall aws-load-balancer-controller -n kube-system || true
+          sleep 30
+          
+          # Destroy Terraform resources
+          cd resources
+          terraform init -backend-config="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/backend.tfvars" || true
           terraform destroy \
             -var-file="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars" \
             -var="deployment_role_arn=${{ secrets.DEPLOYMENT_ROLE_ARN }}" \
-            -auto-approve
+            -auto-approve || true
           
-          echo "status=success" >> $GITHUB_OUTPUT
+          # Delete EKS cluster
+          eksctl delete cluster --name $CLUSTER_NAME --region ${{ env.AWS_REGION }}
+          
           echo "✅ Infrastructure destroyed successfully!"

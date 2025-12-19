@@ -4,32 +4,32 @@
 
 output "cluster_name" {
   description = "Name of the EKS cluster"
-  value       = module.eks.cluster_name
+  value       = try(data.aws_eks_cluster.existing.name, local.cluster_info.cluster_name)
 }
 
 output "cluster_endpoint" {
   description = "Endpoint for EKS control plane"
-  value       = module.eks.cluster_endpoint
+  value       = try(data.aws_eks_cluster.existing.endpoint, "")
 }
 
 output "cluster_security_group_id" {
   description = "Security group ID attached to the EKS cluster"
-  value       = module.eks.cluster_security_group_id
+  value       = try(local.cluster_info.cluster_security_group_id, "")
 }
 
 output "cluster_iam_role_arn" {
   description = "IAM role ARN associated with EKS cluster"
-  value       = module.eks.cluster_iam_role_arn
+  value       = try(data.aws_eks_cluster.existing.role_arn, "")
 }
 
 output "cluster_certificate_authority_data" {
   description = "Base64 encoded certificate data required to communicate with the cluster"
-  value       = module.eks.cluster_certificate_authority_data
+  value       = try(data.aws_eks_cluster.existing.certificate_authority[0].data, "")
 }
 
 output "cluster_version" {
   description = "The Kubernetes version for the EKS cluster"
-  value       = module.eks.cluster_version
+  value       = try(data.aws_eks_cluster.existing.version, "1.34")
 }
 
 ###############################
