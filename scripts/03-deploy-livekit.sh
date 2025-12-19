@@ -30,9 +30,29 @@ echo "   Redis:   $REDIS_ENDPOINT"
 echo "🔧 Updating kubeconfig..."
 aws eks update-kubeconfig --region $AWS_REGION --name $CLUSTER_NAME
 
-# Create namespace
-echo "📦 Creating LiveKit namespace..."
-kubectl create namespace livekit --dry-run=client -o yaml | kubectl apply -f -
+# Smart namespace handling - avoid conflicts
+echo "📦 Handling LiveKit namespace..."
+NAMESPACE="livekit"
+TIMESTAMP=$(date +%s)
+
+# Check if default namespace exists and has LiveKit deployment
+if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
+    echo "✅ Namespace '$NAMESPACE' already exists"
+    
+    # Check if there's already a LiveKit deployment
+    if kubectl get deployment -n "$NAMESPACE" -l app.kubernetes.io/name=livekit >/dev/null 2>&1; then
+        echo "⚠️ Existing LiveKit deployment found in '$NAMESPACE'"
+        echo "🔄 Using unique namespace to avoid conflicts"
+        NAMESPACE="livekit-terraform-${TIMESTAMP}"
+        echo "📦 Creating new namespace: $NAMESPACE"
+        kubectl create namespace "$NAMESPACE"
+    else
+        echo "✅ Using existing namespace '$NAMESPACE' (no conflicts)"
+    fi
+else
+    echo "📦 Creating namespace: $NAMESPACE"
+    kubectl create namespace "$NAMESPACE"
+fi
 
 # Add LiveKit Helm repository
 echo "📦 Adding LiveKit Helm repository..."
@@ -108,40 +128,82 @@ tolerations: []
 affinity: {}
 EOF
 
-# Deploy LiveKit
+# Smart Helm deployment - avoid conflicts
 echo "🚀 Deploying LiveKit..."
-helm upgrade --install livekit livekit/livekit \
-    -n livekit \
-    -f livekit-values-temp.yaml \
-    --wait --timeout=10m
+RELEASE_NAME="livekit"
+
+# Check if default release exists
+if helm list -n "$NAMESPACE" | grep -q "^$RELEASE_NAME\s"; then
+    echo "✅ Release '$RELEASE_NAME' already exists in namespace '$NAMESPACE'"
+    echo "🔄 Upgrading existing release"
+    ACTION="upgrade"
+elif [ "$NAMESPACE" != "livekit" ]; then
+    # Using unique namespace, safe to use default release name
+    echo "📦 Installing new release '$RELEASE_NAME' in namespace '$NAMESPACE'"
+    ACTION="install"
+else
+    # Check if there's any LiveKit release in the namespace
+    EXISTING_RELEASE=$(helm list -n "$NAMESPACE" | grep -i livekit | awk '{print $1}' | head -1)
+    if [ -n "$EXISTING_RELEASE" ]; then
+        echo "⚠️ Found existing LiveKit release: $EXISTING_RELEASE"
+        echo "🔄 Using unique release name to avoid conflicts"
+        RELEASE_NAME="livekit-terraform-${TIMESTAMP}"
+        ACTION="install"
+    else
+        echo "📦 Installing new release '$RELEASE_NAME'"
+        ACTION="install"
+    fi
+fi
+
+# Deploy based on action
+if [ "$ACTION" = "upgrade" ]; then
+    helm upgrade "$RELEASE_NAME" livekit/livekit \
+        -n "$NAMESPACE" \
+        -f livekit-values-temp.yaml \
+        --wait --timeout=10m
+else
+    helm install "$RELEASE_NAME" livekit/livekit \
+        -n "$NAMESPACE" \
+        -f livekit-values-temp.yaml \
+        --wait --timeout=10m
+fi
 
 # Clean up temporary file
 rm -f livekit-values-temp.yaml
 
 # Wait for pods to be ready
 echo "⏳ Waiting for LiveKit pods to be ready..."
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=livekit -n livekit --timeout=300s
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=livekit -n "$NAMESPACE" --timeout=300s
 
 # Get deployment status
 echo "📊 Deployment Status:"
-kubectl get pods -n livekit
-kubectl get svc -n livekit
+kubectl get pods -n "$NAMESPACE"
+kubectl get svc -n "$NAMESPACE"
 
 # Get LoadBalancer endpoint
 echo ""
 echo "🌐 Getting LoadBalancer endpoint..."
-LB_HOSTNAME=$(kubectl get svc -n livekit -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+LB_HOSTNAME=$(kubectl get svc -n "$NAMESPACE" -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
 if [ "$LB_HOSTNAME" != "pending" ] && [ -n "$LB_HOSTNAME" ]; then
     echo "✅ LiveKit is accessible at: $LB_HOSTNAME"
 else
     echo "⏳ LoadBalancer endpoint is still being provisioned..."
-    echo "   Run 'kubectl get svc -n livekit' to check status"
+    echo "   Run 'kubectl get svc -n $NAMESPACE' to check status"
 fi
 
 echo ""
 echo "🎉 LiveKit deployment completed successfully!"
 echo ""
+echo "📋 Deployment Summary:"
+echo "   Namespace: $NAMESPACE"
+echo "   Release: $RELEASE_NAME"
+echo "   Cluster: $CLUSTER_NAME"
+echo "   Redis: $REDIS_ENDPOINT"
+echo ""
 echo "📋 Next steps:"
 echo "   1. Wait for LoadBalancer to get an external IP/hostname"
+echo "      kubectl get svc -n $NAMESPACE"
 echo "   2. Configure your LiveKit client to connect to the endpoint"
 echo "   3. Use the API key and secret from the values file"
+echo ""
+echo "💡 Note: This deployment uses unique names to avoid conflicts with existing setups"

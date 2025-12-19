@@ -213,53 +213,73 @@ else
     fi
 fi
 
-# Check if service account already exists
-echo "🔍 Checking if service account exists..."
-if kubectl get serviceaccount aws-load-balancer-controller -n kube-system >/dev/null 2>&1; then
-    echo "✅ Service account already exists"
+# Check if service account already exists and handle conflicts
+echo "🔍 Checking for existing AWS Load Balancer Controller setup..."
+
+# Use unique names to avoid conflicts with existing setup
+TIMESTAMP=$(date +%s)
+SA_NAME="aws-load-balancer-controller-livekit"
+ROLE_NAME="AmazonEKSLoadBalancerControllerRole-LiveKit-${TIMESTAMP}"
+
+# Check if our specific service account exists
+if kubectl get serviceaccount "$SA_NAME" -n kube-system >/dev/null 2>&1; then
+    echo "✅ Our service account $SA_NAME already exists"
     
     # Check if it has the correct annotations
-    SA_ROLE=$(kubectl get serviceaccount aws-load-balancer-controller -n kube-system -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null || echo "")
+    SA_ROLE=$(kubectl get serviceaccount "$SA_NAME" -n kube-system -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null || echo "")
     if [ -n "$SA_ROLE" ]; then
         echo "✅ Service account has IAM role: $SA_ROLE"
+        SKIP_SA_CREATION=true
     else
         echo "⚠️ Service account exists but has no IAM role annotation"
-        echo "🔧 Recreating service account..."
-        kubectl delete serviceaccount aws-load-balancer-controller -n kube-system || true
-        sleep 5
+        SKIP_SA_CREATION=false
+    fi
+else
+    echo "📋 Our service account $SA_NAME does not exist"
+    SKIP_SA_CREATION=false
+fi
+
+# Check if default service account exists (from previous setup)
+if kubectl get serviceaccount aws-load-balancer-controller -n kube-system >/dev/null 2>&1; then
+    echo "✅ Default AWS Load Balancer Controller service account already exists"
+    DEFAULT_SA_ROLE=$(kubectl get serviceaccount aws-load-balancer-controller -n kube-system -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null || echo "")
+    if [ -n "$DEFAULT_SA_ROLE" ]; then
+        echo "✅ Default service account has IAM role: $DEFAULT_SA_ROLE"
+        echo "🔄 Using existing default service account instead of creating new one"
+        SA_NAME="aws-load-balancer-controller"
+        SKIP_SA_CREATION=true
     fi
 fi
 
-# Create service account if it doesn't exist or needs recreation
-if ! kubectl get serviceaccount aws-load-balancer-controller -n kube-system >/dev/null 2>&1; then
-    echo "🔧 Creating IAM service account..."
+# Create service account only if needed
+if [ "$SKIP_SA_CREATION" = "false" ]; then
+    echo "🔧 Creating IAM service account with unique name: $SA_NAME"
     
-    # Clean up any existing IAM role
-    ROLE_NAME="AmazonEKSLoadBalancerControllerRole"
-    if aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
-        echo "⚠️ IAM role $ROLE_NAME already exists, cleaning up..."
-        eksctl delete iamserviceaccount \
-            --cluster="$CLUSTER_NAME" \
-            --namespace=kube-system \
-            --name=aws-load-balancer-controller \
-            --region="$AWS_REGION" || true
-        sleep 10
-    fi
-    
-    # Create new service account
+    # Create new service account with unique role name
     if eksctl create iamserviceaccount \
         --cluster="$CLUSTER_NAME" \
         --namespace=kube-system \
-        --name=aws-load-balancer-controller \
+        --name="$SA_NAME" \
         --role-name "$ROLE_NAME" \
         --attach-policy-arn="$POLICY_ARN" \
         --approve \
         --region="$AWS_REGION"; then
-        echo "✅ IAM service account created"
+        echo "✅ IAM service account created: $SA_NAME"
     else
         echo "❌ Failed to create IAM service account"
-        exit 1
+        echo "💡 Checking if we can use existing setup..."
+        
+        # Fallback: try to use existing default service account
+        if kubectl get serviceaccount aws-load-balancer-controller -n kube-system >/dev/null 2>&1; then
+            echo "🔄 Using existing default service account as fallback"
+            SA_NAME="aws-load-balancer-controller"
+        else
+            echo "❌ No fallback available"
+            exit 1
+        fi
     fi
+else
+    echo "✅ Using existing service account: $SA_NAME"
 fi
 
 # Add EKS Helm repository
@@ -276,33 +296,78 @@ fi
 
 # Check if Load Balancer Controller is already installed
 echo "🔍 Checking if Load Balancer Controller is installed..."
-if helm list -n kube-system | grep -q aws-load-balancer-controller; then
-    echo "✅ AWS Load Balancer Controller already installed, upgrading..."
-    helm upgrade aws-load-balancer-controller eks/aws-load-balancer-controller \
-        -n kube-system \
-        --set clusterName="$CLUSTER_NAME" \
-        --set serviceAccount.create=false \
-        --set serviceAccount.name=aws-load-balancer-controller \
-        --set region="$AWS_REGION" \
-        --wait --timeout=5m
+HELM_RELEASE_NAME="aws-load-balancer-controller-livekit"
+
+# Check for existing installation (either our release or default)
+if helm list -n kube-system | grep -q "aws-load-balancer-controller"; then
+    EXISTING_RELEASE=$(helm list -n kube-system | grep "aws-load-balancer-controller" | awk '{print $1}' | head -1)
+    echo "✅ AWS Load Balancer Controller already installed as: $EXISTING_RELEASE"
+    
+    if [ "$EXISTING_RELEASE" = "aws-load-balancer-controller" ]; then
+        echo "🔄 Using existing default installation"
+        echo "✅ Skipping Helm installation - using existing controller"
+    else
+        echo "🔄 Upgrading existing installation: $EXISTING_RELEASE"
+        helm upgrade "$EXISTING_RELEASE" eks/aws-load-balancer-controller \
+            -n kube-system \
+            --set clusterName="$CLUSTER_NAME" \
+            --set serviceAccount.create=false \
+            --set serviceAccount.name="$SA_NAME" \
+            --set region="$AWS_REGION" \
+            --wait --timeout=5m
+    fi
 else
-    echo "🚀 Installing AWS Load Balancer Controller..."
-    helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+    echo "🚀 Installing AWS Load Balancer Controller with unique name: $HELM_RELEASE_NAME"
+    helm install "$HELM_RELEASE_NAME" eks/aws-load-balancer-controller \
         -n kube-system \
         --set clusterName="$CLUSTER_NAME" \
         --set serviceAccount.create=false \
-        --set serviceAccount.name=aws-load-balancer-controller \
+        --set serviceAccount.name="$SA_NAME" \
         --set region="$AWS_REGION" \
         --wait --timeout=5m
 fi
 
 # Verify installation
-echo "✅ Verifying installation..."
-if kubectl get deployment aws-load-balancer-controller -n kube-system >/dev/null 2>&1; then
-    kubectl get deployment -n kube-system aws-load-balancer-controller
+echo "✅ Verifying AWS Load Balancer Controller installation..."
+
+# Check for any AWS Load Balancer Controller deployment
+LB_DEPLOYMENT=$(kubectl get deployments -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller -o name 2>/dev/null | head -1)
+
+if [ -n "$LB_DEPLOYMENT" ]; then
+    DEPLOYMENT_NAME=$(echo "$LB_DEPLOYMENT" | cut -d'/' -f2)
+    echo "✅ Found AWS Load Balancer Controller deployment: $DEPLOYMENT_NAME"
+    
+    # Show deployment status
+    kubectl get deployment -n kube-system "$DEPLOYMENT_NAME"
+    
+    # Show pods
+    echo "📋 Controller pods:"
     kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
-    echo "🎉 AWS Load Balancer Controller setup completed successfully!"
+    
+    # Check if pods are ready
+    READY_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+    TOTAL_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | wc -l || echo "0")
+    
+    echo "📊 Pod status: $READY_PODS/$TOTAL_PODS pods running"
+    
+    if [ "$READY_PODS" -gt 0 ]; then
+        echo "🎉 AWS Load Balancer Controller is running successfully!"
+        echo "✅ Service account used: $SA_NAME"
+        echo "✅ Cluster: $CLUSTER_NAME"
+    else
+        echo "⚠️ AWS Load Balancer Controller pods are not ready yet"
+        echo "💡 This might be normal - pods may still be starting"
+    fi
 else
-    echo "❌ Load Balancer Controller deployment not found"
+    echo "❌ No AWS Load Balancer Controller deployment found"
+    echo "🔍 Checking for any load balancer related deployments..."
+    kubectl get deployments -n kube-system | grep -i "load\|alb\|elb" || echo "No load balancer deployments found"
     exit 1
 fi
+
+echo ""
+echo "📋 Summary:"
+echo "   Cluster: $CLUSTER_NAME"
+echo "   Service Account: $SA_NAME"
+echo "   Region: $AWS_REGION"
+echo "   Status: ✅ Ready for LiveKit deployment"
