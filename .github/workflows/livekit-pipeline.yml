@@ -84,7 +84,7 @@ jobs:
           eksctl create cluster \
             --name ${{ env.CLUSTER_NAME }} \
             --region ${{ env.AWS_REGION }} \
-            --version 1.32 \
+            --version 1.31 \
             --nodegroup-name livekit-nodes \
             --instance-types t3.medium \
             --nodes 3 \
