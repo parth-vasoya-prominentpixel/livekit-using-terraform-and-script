@@ -23,6 +23,7 @@ echo "📋 Configuration:"
 echo "   Cluster: $CLUSTER_NAME"
 echo "   Region:  $AWS_REGION"
 echo "   Controller Version: v2.14.1"
+echo "   Mode: SAFE (no deletion of existing resources)"
 
 # Get AWS account ID
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -81,87 +82,30 @@ else
     fi
 fi
 
-# Step 2: Handle Service Account - Three-tier approach
+# Step 2: Use Existing Service Account - NO DELETION/CREATION
 echo ""
-echo "📋 Step 2: Setting up Service Account..."
+echo "📋 Step 2: Using Existing Service Account (Safe Mode)..."
 
-# Tier 1: Check if default service account exists and is properly configured
+# Always use the default service account - DO NOT DELETE OR RECREATE
 DEFAULT_SA="aws-load-balancer-controller"
-UNIQUE_SA="aws-load-balancer-controller-livekit"
-SA_TO_USE=""
+SA_TO_USE="$DEFAULT_SA"
 
 if kubectl get serviceaccount "$DEFAULT_SA" -n kube-system >/dev/null 2>&1; then
     SA_ROLE=$(kubectl get serviceaccount "$DEFAULT_SA" -n kube-system -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null || echo "")
     if [ -n "$SA_ROLE" ]; then
-        echo "✅ Default service account exists and is configured: $DEFAULT_SA"
+        echo "✅ Using existing service account: $DEFAULT_SA"
         echo "   Role: $SA_ROLE"
-        SA_TO_USE="$DEFAULT_SA"
-        
-        # Ask user if they want to use existing or create new
-        echo "🤔 Found existing service account. Options:"
-        echo "   1) Use existing service account (recommended)"
-        echo "   2) Create new service account with unique name"
-        echo "   3) Delete existing and recreate"
-        read -p "Choose option (1-3) [default: 1]: " CHOICE
-        CHOICE=${CHOICE:-1}
-        
-        case $CHOICE in
-            1)
-                echo "✅ Using existing service account: $DEFAULT_SA"
-                ;;
-            2)
-                echo "🔄 Creating new service account with unique name"
-                SA_TO_USE="$UNIQUE_SA"
-                ;;
-            3)
-                echo "🗑️ Deleting existing service account and recreating..."
-                eksctl delete iamserviceaccount \
-                    --cluster="$CLUSTER_NAME" \
-                    --namespace=kube-system \
-                    --name="$DEFAULT_SA" \
-                    --region="$AWS_REGION" || true
-                sleep 10
-                SA_TO_USE="$DEFAULT_SA"
-                ;;
-        esac
     else
-        echo "⚠️ Default service account exists but has no IAM role"
-        SA_TO_USE="$DEFAULT_SA"
+        echo "✅ Using existing service account: $DEFAULT_SA (no role annotation - that's OK)"
     fi
 else
-    echo "📋 No existing service account found"
-    SA_TO_USE="$DEFAULT_SA"
+    echo "⚠️ Service account $DEFAULT_SA not found"
+    echo "💡 Please create it manually or run eksctl create iamserviceaccount"
+    echo "   This script will NOT create or delete any IAM resources"
+    exit 1
 fi
 
-# Create service account if needed
-if [ "$SA_TO_USE" = "$DEFAULT_SA" ] && [ -z "$SA_ROLE" ]; then
-    echo "🔧 Creating service account: $SA_TO_USE"
-    
-    eksctl create iamserviceaccount \
-        --cluster="$CLUSTER_NAME" \
-        --namespace=kube-system \
-        --name="$SA_TO_USE" \
-        --attach-policy-arn="$POLICY_ARN" \
-        --override-existing-serviceaccounts \
-        --region="$AWS_REGION" \
-        --approve
-        
-elif [ "$SA_TO_USE" = "$UNIQUE_SA" ]; then
-    echo "🔧 Creating unique service account: $SA_TO_USE"
-    
-    UNIQUE_ROLE="AmazonEKSLoadBalancerControllerRole-LiveKit-$(date +%s)"
-    
-    eksctl create iamserviceaccount \
-        --cluster="$CLUSTER_NAME" \
-        --namespace=kube-system \
-        --name="$SA_TO_USE" \
-        --role-name="$UNIQUE_ROLE" \
-        --attach-policy-arn="$POLICY_ARN" \
-        --region="$AWS_REGION" \
-        --approve
-fi
-
-echo "✅ Service account ready: $SA_TO_USE"
+echo "✅ Service account ready: $SA_TO_USE (existing - not modified)"
 
 # Step 3: Install AWS Load Balancer Controller
 echo ""
@@ -172,63 +116,29 @@ echo "📦 Adding EKS Helm repository..."
 helm repo add eks https://aws.github.io/eks-charts
 helm repo update eks
 
-# Check for existing installations
+# Handle Helm deployment - SAFE MODE (no uninstall options)
 EXISTING_RELEASE=""
 if helm list -n kube-system | grep -q "aws-load-balancer-controller"; then
     EXISTING_RELEASE=$(helm list -n kube-system | grep "aws-load-balancer-controller" | awk '{print $1}' | head -1)
     echo "✅ Found existing Helm release: $EXISTING_RELEASE"
     
-    echo "🤔 Found existing installation. Options:"
-    echo "   1) Upgrade existing installation"
-    echo "   2) Install with unique name"
-    echo "   3) Uninstall existing and reinstall"
-    read -p "Choose option (1-3) [default: 1]: " HELM_CHOICE
-    HELM_CHOICE=${HELM_CHOICE:-1}
+    echo "🔄 Upgrading existing installation to fix CrashLoopBackOff..."
+    echo "   This will NOT delete any existing resources"
+    echo "   Only updating the deployment configuration"
     
-    case $HELM_CHOICE in
-        1)
-            echo "🔄 Upgrading existing installation: $EXISTING_RELEASE"
-            helm upgrade "$EXISTING_RELEASE" eks/aws-load-balancer-controller \
-                -n kube-system \
-                --set clusterName="$CLUSTER_NAME" \
-                --set serviceAccount.create=false \
-                --set serviceAccount.name="$SA_TO_USE" \
-                --set region="$AWS_REGION" \
-                --set vpcId="$VPC_ID" \
-                --version 1.14.0 \
-                --wait --timeout=10m
-            ;;
-        2)
-            UNIQUE_RELEASE="aws-load-balancer-controller-livekit"
-            echo "🚀 Installing with unique name: $UNIQUE_RELEASE"
-            helm install "$UNIQUE_RELEASE" eks/aws-load-balancer-controller \
-                -n kube-system \
-                --set clusterName="$CLUSTER_NAME" \
-                --set serviceAccount.create=false \
-                --set serviceAccount.name="$SA_TO_USE" \
-                --set region="$AWS_REGION" \
-                --set vpcId="$VPC_ID" \
-                --version 1.14.0 \
-                --wait --timeout=10m
-            ;;
-        3)
-            echo "🗑️ Uninstalling existing and reinstalling..."
-            helm uninstall "$EXISTING_RELEASE" -n kube-system || true
-            sleep 30
-            
-            helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
-                -n kube-system \
-                --set clusterName="$CLUSTER_NAME" \
-                --set serviceAccount.create=false \
-                --set serviceAccount.name="$SA_TO_USE" \
-                --set region="$AWS_REGION" \
-                --set vpcId="$VPC_ID" \
-                --version 1.14.0 \
-                --wait --timeout=10m
-            ;;
-    esac
+    helm upgrade "$EXISTING_RELEASE" eks/aws-load-balancer-controller \
+        -n kube-system \
+        --set clusterName="$CLUSTER_NAME" \
+        --set serviceAccount.create=false \
+        --set serviceAccount.name="$SA_TO_USE" \
+        --set region="$AWS_REGION" \
+        --set vpcId="$VPC_ID" \
+        --version 1.14.0 \
+        --wait --timeout=10m
+        
+    echo "✅ Upgrade completed - should fix CrashLoopBackOff issues"
 else
-    echo "🚀 Installing AWS Load Balancer Controller..."
+    echo "🚀 Installing AWS Load Balancer Controller (new installation)..."
     helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
         -n kube-system \
         --set clusterName="$CLUSTER_NAME" \
