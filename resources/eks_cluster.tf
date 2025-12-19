@@ -22,13 +22,12 @@ module "eks" {
   vpc_id     = local.vpc_id
   subnet_ids = local.private_subnet_ids
 
-  # EKS Managed Node Groups
+  # EKS Managed Node Groups - Based on official example
   eks_managed_node_groups = {
     livekit_nodes = {
-      # Using specific AMI for Kubernetes 1.34
+      # Using AL2023 for Kubernetes 1.34
       instance_types = ["t3.medium"]
       ami_type       = "AL2023_x86_64_STANDARD"
-      ami_id         = "ami-0f39f5f4f413a470f"
       
       min_size = 1
       max_size = 10
@@ -45,12 +44,20 @@ module "eks" {
         "node-type"                  = "livekit-worker"
       }
 
-      # Security configuration
-      metadata_options = {
-        http_endpoint = "enabled"
-        http_tokens   = "required"
-        http_put_response_hop_limit = 2
-      }
+      # This is not required - demonstrates how to pass additional configuration to nodeadm
+      # Ref https://awslabs.github.io/amazon-eks-ami/nodeadm/doc/api/
+      cloudinit_pre_nodeadm = [{
+        content_type = "application/node.eks.aws"
+        content      = <<-EOT
+          ---
+          apiVersion: node.eks.aws/v1alpha1
+          kind: NodeConfig
+          spec:
+            kubelet:
+              config:
+                shutdownGracePeriod: 30s
+        EOT
+      }]
     }
   }
 

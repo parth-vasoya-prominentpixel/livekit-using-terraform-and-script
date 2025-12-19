@@ -147,11 +147,10 @@ output "deployment_summary" {
 output "cluster_configuration" {
   description = "EKS cluster configuration"
   value = {
-    cluster_name      = module.eks.cluster_name
+    cluster_name       = module.eks.cluster_name
     kubernetes_version = var.cluster_version
-    managed_nodes     = true
-    ami_type         = "AL2023_x86_64_STANDARD"
-    instance_types   = ["t3.medium"]
+    managed_nodes      = true
+    node_groups_count  = length(module.eks.eks_managed_node_groups)
   }
 }
 
@@ -183,10 +182,9 @@ output "node_groups" {
   description = "EKS managed node groups"
   value = {
     for name, ng in module.eks.eks_managed_node_groups : name => {
-      node_group_arn = ng.node_group_arn
-      node_group_id  = ng.node_group_id
-      instance_types = ng.instance_types
-      ami_type      = ng.ami_type
+      node_group_arn    = ng.node_group_arn
+      node_group_id     = ng.node_group_id
+      node_group_status = ng.node_group_status
     }
   }
 }
