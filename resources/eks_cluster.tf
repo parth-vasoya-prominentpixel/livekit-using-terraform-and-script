@@ -4,11 +4,16 @@ module "eks_al2023" {
   version = "~> 21.0"
 
   name               = local.eks_name
-  kubernetes_version = var.cluster_version
+  kubernetes_version = "1.34"
 
   # VPC Configuration
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
+
+  # Cluster endpoint configuration - enable public access for CI/CD
+  endpoint_private_access = true
+  endpoint_public_access  = true
+  endpoint_public_access_cidrs = ["0.0.0.0/0"]
 
   # EKS Addons - exactly as in official example
   addons = {

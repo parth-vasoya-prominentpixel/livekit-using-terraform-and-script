@@ -10,7 +10,7 @@ public_subnets  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
 
 # EKS Configuration
 cluster_name    = "livekit"
-cluster_version = "1.33"
+cluster_version = "1.34"
 
 # EKS Auto Mode Configuration
 auto_mode_enabled = true

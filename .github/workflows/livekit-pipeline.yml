@@ -193,16 +193,7 @@ jobs:
           
           echo "🚀 Proceeding with Terraform apply..."
           
-          # Clean up existing access entries to prevent conflicts
-          CLUSTER_NAME_FROM_TFVARS=$(grep 'cluster_name' ../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars | cut -d'"' -f2)
-          PREFIX=$(grep 'prefix_company' ../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars | cut -d'"' -f2)
-          FULL_CLUSTER_NAME="$PREFIX-eks-$CLUSTER_NAME_FROM_TFVARS-use1-${{ inputs.environment }}"
-          
-          echo "🧹 Running access entry cleanup..."
-          cd ../scripts
-          chmod +x cleanup-access-entries.sh
-          CLUSTER_NAME="$FULL_CLUSTER_NAME" AWS_REGION="${{ env.AWS_REGION }}" ./cleanup-access-entries.sh
-          cd ../resources
+          echo "🚀 Proceeding with clean Terraform apply..."
           
           terraform plan \
             -var-file="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars" \
@@ -359,40 +350,39 @@ jobs:
           curl -fsSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz | tar -xz
           sudo mv linux-amd64/helm /usr/local/bin/
 
-      - name: 1️⃣ Remove LiveKit & Load Balancer (Optional Cleanup)
-        working-directory: resources
-        run: |
-          echo "🗑️ Attempting to clean up LiveKit and Load Balancer..."
-          
-          # Try to get cluster name from Terraform state
-          terraform init -backend-config="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/backend.tfvars" || true
-          CLUSTER_NAME=$(terraform output -raw cluster_name 2>/dev/null || echo "")
-          
-          if [ -n "$CLUSTER_NAME" ]; then
-            echo "📋 Found cluster: $CLUSTER_NAME"
-            aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name "$CLUSTER_NAME" || true
-            
-            # Remove LiveKit namespace
-            kubectl delete namespace livekit --ignore-not-found=true --timeout=120s || true
-            
-            # Remove Load Balancer Controller
-            helm uninstall aws-load-balancer-controller -n kube-system || true
-            
-            echo "✅ Applications cleanup attempted!"
-          else
-            echo "⚠️ No cluster found, skipping application cleanup"
-          fi
-
-      - name: 2️⃣ Destroy All Infrastructure
+      - name: 🗑️ Destroy All Infrastructure
         working-directory: resources
         run: |
           echo "🗑️ Destroying all infrastructure with Terraform..."
           
           terraform init -backend-config="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/backend.tfvars"
-          terraform destroy \
-            -var-file="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars" \
-            -var="deployment_role_arn=${{ secrets.DEPLOYMENT_ROLE_ARN }}" \
-            -auto-approve
           
-          echo "✅ All infrastructure destroyed!"
-          echo "🎉 DESTRUCTION COMPLETE!"
+          # Run destroy with retries in case of transient errors
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
+          
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            echo "🔄 Destroy attempt $ATTEMPT/$MAX_ATTEMPTS..."
+            
+            if terraform destroy \
+              -var-file="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/inputs.tfvars" \
+              -var="deployment_role_arn=${{ secrets.DEPLOYMENT_ROLE_ARN }}" \
+              -auto-approve; then
+              echo "✅ All infrastructure destroyed!"
+              echo "🎉 DESTRUCTION COMPLETE!"
+              exit 0
+            else
+              echo "⚠️ Destroy attempt $ATTEMPT failed"
+              
+              if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+                echo "❌ Destroy failed after $MAX_ATTEMPTS attempts"
+                echo "🔍 Checking for remaining resources..."
+                terraform state list || true
+                exit 1
+              fi
+              
+              echo "⏳ Waiting 30 seconds before retry..."
+              sleep 30
+              ATTEMPT=$((ATTEMPT + 1))
+            fi
+          done
