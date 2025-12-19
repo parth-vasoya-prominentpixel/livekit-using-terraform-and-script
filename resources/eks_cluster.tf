@@ -25,9 +25,10 @@ module "eks" {
   # EKS Managed Node Groups
   eks_managed_node_groups = {
     livekit_nodes = {
-      # Using Amazon Linux 2 (standard Linux/UNIX)
+      # Using specific AMI for Kubernetes 1.34
       instance_types = ["t3.medium"]
-      ami_type       = "AL2_x86_64"
+      ami_type       = "AL2023_x86_64_STANDARD"
+      ami_id         = "ami-0f39f5f4f413a470f"
       
       min_size = 1
       max_size = 10

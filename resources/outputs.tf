@@ -150,7 +150,7 @@ output "cluster_configuration" {
     cluster_name      = module.eks.cluster_name
     kubernetes_version = var.cluster_version
     managed_nodes     = true
-    ami_type         = "AL2_x86_64"
+    ami_type         = "AL2023_x86_64_STANDARD"
     instance_types   = ["t3.medium"]
   }
 }
