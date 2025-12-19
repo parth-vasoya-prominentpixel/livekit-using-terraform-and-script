@@ -17,9 +17,6 @@ module "eks_al2023" {
   
   # Cluster access configuration
   authentication_mode = "API_AND_CONFIG_MAP"
-  
-  # Bootstrap cluster creator admin permissions
-  bootstrap_self_managed_addons = true
 
   # EKS Addons - exactly as in official example
   addons = {
@@ -69,23 +66,13 @@ module "eks_al2023" {
   enable_cluster_creator_admin_permissions = true
   
   # Additional access entries for GitHub Actions and deployment role
-  access_entries = {
+  access_entries = var.deployment_role_arn != "" ? {
     deployment_role = {
       kubernetes_groups = ["system:masters"]
       principal_arn     = var.deployment_role_arn
       type             = "STANDARD"
     }
-  }
-  
-  # Ensure the deployment role can access the cluster
-  manage_aws_auth_configmap = true
-  aws_auth_roles = [
-    {
-      rolearn  = var.deployment_role_arn
-      username = "deployment-role"
-      groups   = ["system:masters"]
-    }
-  ]
+  } : {}
 
   # KMS Configuration - Use AWS managed KMS key (more cost-effective)
   # AWS managed keys are free and automatically rotated
