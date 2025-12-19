@@ -52,8 +52,11 @@ module "eks_al2023" {
     }
   }
 
-  # Enable cluster creator admin permissions (default behavior)
-  enable_cluster_creator_admin_permissions = true
+  # Disable all access management to avoid conflicts
+  enable_cluster_creator_admin_permissions = false
+  manage_aws_auth_configmap = false
+  
+  # Let EKS handle access naturally without explicit configuration
 
   tags = local.tags
 }
