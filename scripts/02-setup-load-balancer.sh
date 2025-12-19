@@ -82,30 +82,81 @@ else
     fi
 fi
 
-# Step 2: Use Existing Service Account - NO DELETION/CREATION
+# Step 2: Handle Service Account - Smart Detection and Creation
 echo ""
-echo "📋 Step 2: Using Existing Service Account (Safe Mode)..."
+echo "📋 Step 2: Setting up Service Account..."
+echo "🔍 Checking for existing AWS Load Balancer Controller service account..."
 
-# Always use the default service account - DO NOT DELETE OR RECREATE
+# Default service account name
 DEFAULT_SA="aws-load-balancer-controller"
 SA_TO_USE="$DEFAULT_SA"
 
+# Check if service account exists
 if kubectl get serviceaccount "$DEFAULT_SA" -n kube-system >/dev/null 2>&1; then
+    echo "✅ Found existing service account: $DEFAULT_SA"
+    
+    # Check if it has IAM role annotation
     SA_ROLE=$(kubectl get serviceaccount "$DEFAULT_SA" -n kube-system -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null || echo "")
     if [ -n "$SA_ROLE" ]; then
-        echo "✅ Using existing service account: $DEFAULT_SA"
-        echo "   Role: $SA_ROLE"
+        echo "✅ Service account has IAM role annotation: $SA_ROLE"
+        echo "🎯 Using existing service account (no changes needed)"
     else
-        echo "✅ Using existing service account: $DEFAULT_SA (no role annotation - that's OK)"
+        echo "⚠️ Service account exists but has no IAM role annotation"
+        echo "🔧 This is OK - the service account can still work with node IAM roles"
+        echo "🎯 Using existing service account (no changes needed)"
     fi
+    
+    SA_TO_USE="$DEFAULT_SA"
+    echo "✅ Service account ready: $SA_TO_USE"
+    
 else
-    echo "⚠️ Service account $DEFAULT_SA not found"
-    echo "💡 Please create it manually or run eksctl create iamserviceaccount"
-    echo "   This script will NOT create or delete any IAM resources"
-    exit 1
+    echo "📋 Service account $DEFAULT_SA not found"
+    echo "🔧 Creating new service account with IAM role using eksctl..."
+    echo "📋 This will create:"
+    echo "   - Service account: $DEFAULT_SA"
+    echo "   - IAM role: AmazonEKSLoadBalancerControllerRole"
+    echo "   - Role binding to policy: AWSLoadBalancerControllerIAMPolicy"
+    
+    echo "⏳ Creating service account (this may take 2-3 minutes)..."
+    
+    # Create service account with eksctl
+    if eksctl create iamserviceaccount \
+        --cluster="$CLUSTER_NAME" \
+        --namespace=kube-system \
+        --name="$DEFAULT_SA" \
+        --attach-policy-arn="$POLICY_ARN" \
+        --override-existing-serviceaccounts \
+        --region="$AWS_REGION" \
+        --approve; then
+        
+        echo "✅ Service account created successfully: $DEFAULT_SA"
+        
+        # Verify the service account was created with role
+        echo "🔍 Verifying service account creation..."
+        sleep 10  # Wait for service account to be fully ready
+        
+        SA_ROLE=$(kubectl get serviceaccount "$DEFAULT_SA" -n kube-system -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null || echo "")
+        if [ -n "$SA_ROLE" ]; then
+            echo "✅ Service account verified with IAM role: $SA_ROLE"
+        else
+            echo "⚠️ Service account created but role annotation not found yet"
+            echo "💡 This is normal - role binding may take a few moments"
+        fi
+        
+        SA_TO_USE="$DEFAULT_SA"
+        echo "✅ Service account ready: $SA_TO_USE"
+        
+    else
+        echo "❌ Failed to create service account"
+        echo "💡 Possible issues:"
+        echo "   - IAM permissions insufficient"
+        echo "   - OIDC provider not configured for cluster"
+        echo "   - Network connectivity issues"
+        exit 1
+    fi
 fi
 
-echo "✅ Service account ready: $SA_TO_USE (existing - not modified)"
+echo "📋 Service account configuration complete"
 
 # Step 3: Install AWS Load Balancer Controller
 echo ""
@@ -113,20 +164,40 @@ echo "📋 Step 3: Installing AWS Load Balancer Controller..."
 
 # Add EKS Helm repository
 echo "📦 Adding EKS Helm repository..."
-helm repo add eks https://aws.github.io/eks-charts
-helm repo update eks
+echo "🔍 Adding official AWS EKS charts repository..."
+if helm repo add eks https://aws.github.io/eks-charts; then
+    echo "✅ EKS charts repository added successfully"
+else
+    echo "⚠️ Repository might already exist, continuing..."
+fi
 
-# Handle Helm deployment - SAFE MODE (no uninstall options)
+echo "🔄 Updating Helm repositories to get latest charts..."
+if helm repo update eks; then
+    echo "✅ Helm repositories updated successfully"
+else
+    echo "❌ Failed to update Helm repositories"
+    exit 1
+fi
+
+# Check for existing Helm installations
+echo "🔍 Checking for existing AWS Load Balancer Controller installations..."
 EXISTING_RELEASE=""
 if helm list -n kube-system | grep -q "aws-load-balancer-controller"; then
     EXISTING_RELEASE=$(helm list -n kube-system | grep "aws-load-balancer-controller" | awk '{print $1}' | head -1)
     echo "✅ Found existing Helm release: $EXISTING_RELEASE"
     
-    echo "🔄 Upgrading existing installation to fix CrashLoopBackOff..."
-    echo "   This will NOT delete any existing resources"
-    echo "   Only updating the deployment configuration"
+    echo "🔄 Upgrading existing installation..."
+    echo "📋 Upgrade configuration:"
+    echo "   - Release: $EXISTING_RELEASE"
+    echo "   - Cluster: $CLUSTER_NAME"
+    echo "   - Service Account: $SA_TO_USE (existing)"
+    echo "   - VPC ID: $VPC_ID"
+    echo "   - Region: $AWS_REGION"
+    echo "   - Chart Version: 1.14.0"
+    echo ""
+    echo "⏳ Starting Helm upgrade (this may take 5-10 minutes)..."
     
-    helm upgrade "$EXISTING_RELEASE" eks/aws-load-balancer-controller \
+    if helm upgrade "$EXISTING_RELEASE" eks/aws-load-balancer-controller \
         -n kube-system \
         --set clusterName="$CLUSTER_NAME" \
         --set serviceAccount.create=false \
@@ -134,12 +205,32 @@ if helm list -n kube-system | grep -q "aws-load-balancer-controller"; then
         --set region="$AWS_REGION" \
         --set vpcId="$VPC_ID" \
         --version 1.14.0 \
-        --wait --timeout=10m
+        --wait --timeout=10m; then
         
-    echo "✅ Upgrade completed - should fix CrashLoopBackOff issues"
+        echo "✅ Helm upgrade completed successfully"
+        echo "🎯 This should fix any CrashLoopBackOff issues"
+    else
+        echo "❌ Helm upgrade failed"
+        echo "💡 Checking current deployment status..."
+        kubectl get deployment -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller || echo "No deployment found"
+        exit 1
+    fi
+        
 else
-    echo "🚀 Installing AWS Load Balancer Controller (new installation)..."
-    helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+    echo "📋 No existing installation found"
+    echo "🚀 Installing AWS Load Balancer Controller (fresh installation)..."
+    echo "📋 Installation configuration:"
+    echo "   - Release Name: aws-load-balancer-controller"
+    echo "   - Namespace: kube-system"
+    echo "   - Cluster: $CLUSTER_NAME"
+    echo "   - Service Account: $SA_TO_USE"
+    echo "   - VPC ID: $VPC_ID"
+    echo "   - Region: $AWS_REGION"
+    echo "   - Chart Version: 1.14.0"
+    echo ""
+    echo "⏳ Starting Helm installation (this may take 5-10 minutes)..."
+    
+    if helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
         -n kube-system \
         --set clusterName="$CLUSTER_NAME" \
         --set serviceAccount.create=false \
@@ -147,12 +238,23 @@ else
         --set region="$AWS_REGION" \
         --set vpcId="$VPC_ID" \
         --version 1.14.0 \
-        --wait --timeout=10m
+        --wait --timeout=10m; then
+        
+        echo "✅ Helm installation completed successfully"
+    else
+        echo "❌ Helm installation failed"
+        echo "💡 Checking for any partial deployment..."
+        kubectl get deployment -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller || echo "No deployment found"
+        exit 1
+    fi
 fi
+
+echo "📋 Helm deployment phase completed"
 
 # Step 4: Verify Installation
 echo ""
 echo "📋 Step 4: Verifying Installation..."
+echo "🔍 Looking for AWS Load Balancer Controller deployment..."
 
 # Find the deployment
 LB_DEPLOYMENT=$(kubectl get deployments -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller -o name 2>/dev/null | head -1)
@@ -161,41 +263,85 @@ if [ -n "$LB_DEPLOYMENT" ]; then
     DEPLOYMENT_NAME=$(echo "$LB_DEPLOYMENT" | cut -d'/' -f2)
     echo "✅ Found AWS Load Balancer Controller deployment: $DEPLOYMENT_NAME"
     
-    # Show deployment status
+    # Show current deployment status
+    echo "📋 Current deployment status:"
     kubectl get deployment -n kube-system "$DEPLOYMENT_NAME"
     
-    # Wait for pods to be ready
-    echo "⏳ Waiting for pods to be ready (up to 5 minutes)..."
+    # Wait for deployment to be ready
+    echo ""
+    echo "⏳ Waiting for deployment to be ready (timeout: 5 minutes)..."
+    echo "💡 This step ensures all pods are running and healthy"
+    
     if kubectl wait --for=condition=available deployment/"$DEPLOYMENT_NAME" -n kube-system --timeout=300s; then
-        echo "✅ AWS Load Balancer Controller is ready!"
+        echo "✅ AWS Load Balancer Controller deployment is ready!"
         
-        # Show pod status
-        echo "📋 Controller pods:"
+        # Show final pod status
+        echo ""
+        echo "📋 Final pod status:"
         kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
         
-        # Check logs if pods are not running
-        FAILED_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers | grep -v "Running" | awk '{print $1}' || echo "")
-        if [ -n "$FAILED_PODS" ]; then
-            echo "⚠️ Some pods are not running. Checking logs..."
-            for pod in $FAILED_PODS; do
-                echo "📋 Logs for $pod:"
-                kubectl logs "$pod" -n kube-system --tail=20 || echo "Could not get logs"
+        # Count running pods
+        RUNNING_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers | grep -c "Running" || echo "0")
+        TOTAL_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers | wc -l || echo "0")
+        
+        echo "📊 Pod status: $RUNNING_PODS/$TOTAL_PODS pods running"
+        
+        if [ "$RUNNING_PODS" -eq "$TOTAL_PODS" ] && [ "$RUNNING_PODS" -gt 0 ]; then
+            echo "🎉 All pods are running successfully!"
+        else
+            echo "⚠️ Some pods may not be running. Checking logs..."
+            
+            # Show logs for non-running pods
+            kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers | while read pod status rest; do
+                if [ "$status" != "Running" ]; then
+                    echo "📋 Logs for non-running pod $pod (status: $status):"
+                    kubectl logs "$pod" -n kube-system --tail=20 || echo "Could not get logs for $pod"
+                    echo "---"
+                fi
             done
         fi
+        
     else
         echo "⚠️ Deployment did not become ready within 5 minutes"
-        echo "📋 Current status:"
+        echo "📋 This might indicate configuration issues"
+        
+        echo ""
+        echo "📋 Current deployment status:"
         kubectl get deployment -n kube-system "$DEPLOYMENT_NAME"
+        
+        echo ""
+        echo "📋 Current pod status:"
         kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
         
-        echo "📋 Checking pod logs for issues..."
+        echo ""
+        echo "📋 Checking pod logs for troubleshooting..."
         kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers | awk '{print $1}' | while read pod; do
-            echo "📋 Logs for $pod:"
-            kubectl logs "$pod" -n kube-system --tail=20 || echo "Could not get logs"
+            if [ -n "$pod" ]; then
+                echo "📋 Logs for $pod:"
+                kubectl logs "$pod" -n kube-system --tail=30 || echo "Could not get logs for $pod"
+                echo "---"
+            fi
         done
+        
+        echo ""
+        echo "💡 Common issues and solutions:"
+        echo "   - Check IAM permissions for the service account"
+        echo "   - Verify VPC ID and region are correct"
+        echo "   - Check if OIDC provider is configured for the cluster"
+        echo "   - Review pod logs above for specific error messages"
     fi
 else
     echo "❌ No AWS Load Balancer Controller deployment found"
+    echo "💡 This indicates the Helm installation may have failed"
+    echo "🔍 Checking for any related resources..."
+    
+    # Check for any pods with the label
+    kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller || echo "No pods found"
+    
+    # Check Helm releases
+    echo "📋 Checking Helm releases:"
+    helm list -n kube-system | grep -i "load-balancer\|alb" || echo "No load balancer related releases found"
+    
     exit 1
 fi
 
