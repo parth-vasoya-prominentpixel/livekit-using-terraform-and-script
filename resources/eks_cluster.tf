@@ -65,22 +65,8 @@ module "eks_al2023" {
   # Enable cluster creator admin permissions
   enable_cluster_creator_admin_permissions = true
   
-  # Access entries - using cluster-admin instead of system:masters
-  access_entries = var.deployment_role_arn != "" ? {
-    deployment_role = {
-      kubernetes_groups = []
-      principal_arn     = var.deployment_role_arn
-      type             = "STANDARD"
-      policy_associations = {
-        admin = {
-          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-          access_scope = {
-            type = "cluster"
-          }
-        }
-      }
-    }
-  } : {}
+  # Cluster creator admin permissions already provide access
+  # No additional access entries needed
 
   # Use default encryption configuration (creates customer-managed KMS key)
   # For cost optimization in production, consider using AWS managed keys
