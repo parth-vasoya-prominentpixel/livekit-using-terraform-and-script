@@ -264,36 +264,36 @@ jobs:
         run: |
           chmod +x 02-setup-load-balancer.sh
           
-          # Wait for cluster to be ready and verify status
+          # Wait for cluster to be ready and verify status (optimized)
           echo "⏳ Waiting for cluster to be ready..."
           echo "📋 Cluster: ${{ needs.terraform-apply.outputs.cluster-name }}"
           
-          # Initial wait for cluster stabilization
-          sleep 90
+          # Reduced initial wait for cluster stabilization
+          sleep 60
           
-          # Verify cluster is ACTIVE before proceeding (max 3 attempts)
+          # Verify cluster is ACTIVE before proceeding (max 5 attempts with shorter intervals)
           echo "🔍 Verifying cluster status..."
-          for i in {1..3}; do
+          for i in {1..5}; do
             CLUSTER_STATUS=$(aws eks describe-cluster --name "${{ needs.terraform-apply.outputs.cluster-name }}" --region "${{ env.AWS_REGION }}" --query 'cluster.status' --output text 2>/dev/null || echo "UNKNOWN")
-            echo "📋 Cluster status: $CLUSTER_STATUS (attempt $i/3)"
+            echo "📋 Cluster status: $CLUSTER_STATUS (attempt $i/5)"
             
             if [ "$CLUSTER_STATUS" = "ACTIVE" ]; then
               echo "✅ Cluster is ACTIVE and ready"
               break
             elif [ "$CLUSTER_STATUS" = "CREATING" ]; then
-              echo "⏳ Cluster still creating, waiting 60 seconds..."
-              sleep 60
+              echo "⏳ Cluster still creating, waiting 30 seconds..."
+              sleep 30
             else
               echo "❌ Unexpected cluster status: $CLUSTER_STATUS"
-              if [ $i -eq 3 ]; then
-                echo "❌ Cluster not ready after 3 attempts"
+              if [ $i -eq 5 ]; then
+                echo "❌ Cluster not ready after 5 attempts"
                 echo "💡 Check AWS Console for cluster status"
                 exit 1
               fi
             fi
           done
           
-          # Run the script with retry
+          # Run the script with optimized settings
           CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}" \
           AWS_REGION="${{ env.AWS_REGION }}" \
           ./02-setup-load-balancer.sh
@@ -339,6 +339,7 @@ jobs:
           chmod +x 03-deploy-livekit.sh
           CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}" \
           REDIS_ENDPOINT="${{ needs.terraform-apply.outputs.redis-endpoint }}" \
+          AWS_REGION="${{ env.AWS_REGION }}" \
           ./03-deploy-livekit.sh
 
   # DESTROY: Remove everything
@@ -414,8 +415,8 @@ jobs:
                 exit 1
               fi
               
-              echo "⏳ Waiting 30 seconds before retry..."
-              sleep 30
+              echo "⏳ Waiting 15 seconds before retry..."
+              sleep 15
               ATTEMPT=$((ATTEMPT + 1))
             fi
           done
