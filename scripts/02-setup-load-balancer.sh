@@ -179,23 +179,122 @@ else
     exit 1
 fi
 
-# Check for existing Helm installations
+# Check for existing Helm installations and handle failed deployments
 echo "🔍 Checking for existing AWS Load Balancer Controller installations..."
 EXISTING_RELEASE=""
+TIMESTAMP=$(date +%s)
+NEW_RELEASE_NAME="aws-load-balancer-controller-terraform-${TIMESTAMP}"
+
 if helm list -n kube-system | grep -q "aws-load-balancer-controller"; then
     EXISTING_RELEASE=$(helm list -n kube-system | grep "aws-load-balancer-controller" | awk '{print $1}' | head -1)
     echo "✅ Found existing Helm release: $EXISTING_RELEASE"
     
-    echo "🔄 Upgrading existing installation..."
+    # Check if the existing deployment is healthy
+    echo "🔍 Checking health of existing deployment..."
+    DEPLOYMENT_STATUS=$(kubectl get deployment -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | awk '{print $2}' | head -1)
+    
+    if [ -n "$DEPLOYMENT_STATUS" ]; then
+        READY=$(echo "$DEPLOYMENT_STATUS" | cut -d'/' -f1)
+        DESIRED=$(echo "$DEPLOYMENT_STATUS" | cut -d'/' -f2)
+        
+        echo "📋 Current deployment status: $READY/$DESIRED pods ready"
+        
+        if [ "$READY" = "0" ] || [ "$READY" != "$DESIRED" ]; then
+            echo "⚠️ Existing deployment is unhealthy (0 pods ready or not all pods ready)"
+            echo "🗑️ Removing failed deployment to start fresh..."
+            
+            # Show current resources before cleanup
+            echo "📋 Current resources before cleanup:"
+            echo "   Helm releases:"
+            helm list -n kube-system | grep -i load-balancer || echo "   No load balancer releases found"
+            echo "   Deployments:"
+            kubectl get deployment -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller || echo "   No deployments found"
+            echo "   Pods:"
+            kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller || echo "   No pods found"
+            
+            echo ""
+            echo "🗑️ Step 1: Uninstalling failed Helm release: $EXISTING_RELEASE"
+            if helm uninstall "$EXISTING_RELEASE" -n kube-system; then
+                echo "✅ Helm release uninstalled successfully"
+            else
+                echo "⚠️ Helm uninstall failed, but continuing with cleanup..."
+            fi
+            
+            echo ""
+            echo "⏳ Step 2: Waiting for Helm cleanup to propagate (30 seconds)..."
+            for i in {1..30}; do
+                printf "."
+                sleep 1
+            done
+            echo " Done!"
+            
+            # Show status after Helm uninstall
+            echo "📋 Status after Helm uninstall:"
+            REMAINING_DEPLOYMENTS=$(kubectl get deployment -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | wc -l)
+            REMAINING_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | wc -l)
+            echo "   Remaining deployments: $REMAINING_DEPLOYMENTS"
+            echo "   Remaining pods: $REMAINING_PODS"
+            
+            # Force delete any remaining resources
+            echo ""
+            echo "🧹 Step 3: Force cleaning any remaining resources..."
+            if [ "$REMAINING_DEPLOYMENTS" -gt 0 ]; then
+                echo "   Deleting remaining deployments..."
+                kubectl delete deployment -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --ignore-not-found=true
+            fi
+            
+            if [ "$REMAINING_PODS" -gt 0 ]; then
+                echo "   Deleting remaining pods..."
+                kubectl delete pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --ignore-not-found=true
+            fi
+            
+            echo ""
+            echo "⏳ Step 4: Waiting for resource cleanup to complete (15 seconds)..."
+            for i in {1..15}; do
+                printf "."
+                sleep 1
+            done
+            echo " Done!"
+            
+            # Final verification
+            echo "📋 Final cleanup verification:"
+            FINAL_DEPLOYMENTS=$(kubectl get deployment -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | wc -l)
+            FINAL_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | wc -l)
+            echo "   Remaining deployments: $FINAL_DEPLOYMENTS"
+            echo "   Remaining pods: $FINAL_PODS"
+            
+            if [ "$FINAL_DEPLOYMENTS" -eq 0 ] && [ "$FINAL_PODS" -eq 0 ]; then
+                echo "✅ Cleanup completed successfully - ready for fresh installation"
+            else
+                echo "⚠️ Some resources may still be terminating - proceeding anyway"
+            fi
+            
+            EXISTING_RELEASE=""  # Clear existing release to trigger fresh install
+        else
+            echo "✅ Existing deployment appears healthy"
+            echo "🔄 Attempting to upgrade existing installation..."
+        fi
+    else
+        echo "⚠️ No deployment found for existing release"
+        echo "🗑️ Cleaning up orphaned Helm release..."
+        helm uninstall "$EXISTING_RELEASE" -n kube-system || true
+        sleep 15
+        EXISTING_RELEASE=""  # Clear to trigger fresh install
+    fi
+fi
+
+# Handle installation based on existing release status
+if [ -n "$EXISTING_RELEASE" ]; then
+    echo "🔄 Upgrading existing healthy installation..."
     echo "📋 Upgrade configuration:"
     echo "   - Release: $EXISTING_RELEASE"
     echo "   - Cluster: $CLUSTER_NAME"
-    echo "   - Service Account: $SA_TO_USE (existing)"
+    echo "   - Service Account: $SA_TO_USE"
     echo "   - VPC ID: $VPC_ID"
     echo "   - Region: $AWS_REGION"
     echo "   - Chart Version: 1.14.0"
     echo ""
-    echo "⏳ Starting Helm upgrade (this may take 5-10 minutes)..."
+    echo "⏳ Starting Helm upgrade (timeout: 8 minutes)..."
     
     if helm upgrade "$EXISTING_RELEASE" eks/aws-load-balancer-controller \
         -n kube-system \
@@ -205,22 +304,25 @@ if helm list -n kube-system | grep -q "aws-load-balancer-controller"; then
         --set region="$AWS_REGION" \
         --set vpcId="$VPC_ID" \
         --version 1.14.0 \
-        --wait --timeout=10m; then
+        --wait --timeout=8m; then
         
         echo "✅ Helm upgrade completed successfully"
-        echo "🎯 This should fix any CrashLoopBackOff issues"
     else
         echo "❌ Helm upgrade failed"
-        echo "💡 Checking current deployment status..."
-        kubectl get deployment -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller || echo "No deployment found"
-        exit 1
-    fi
+        echo "🔄 Falling back to fresh installation with unique name..."
         
-else
-    echo "📋 No existing installation found"
+        # Uninstall failed upgrade
+        helm uninstall "$EXISTING_RELEASE" -n kube-system || true
+        sleep 30
+        EXISTING_RELEASE=""  # Trigger fresh install below
+    fi
+fi
+
+# Fresh installation (either no existing release or upgrade failed)
+if [ -z "$EXISTING_RELEASE" ]; then
     echo "🚀 Installing AWS Load Balancer Controller (fresh installation)..."
     echo "📋 Installation configuration:"
-    echo "   - Release Name: aws-load-balancer-controller"
+    echo "   - Release Name: $NEW_RELEASE_NAME"
     echo "   - Namespace: kube-system"
     echo "   - Cluster: $CLUSTER_NAME"
     echo "   - Service Account: $SA_TO_USE"
@@ -228,9 +330,19 @@ else
     echo "   - Region: $AWS_REGION"
     echo "   - Chart Version: 1.14.0"
     echo ""
-    echo "⏳ Starting Helm installation (this may take 5-10 minutes)..."
+    echo "⏳ Starting Helm installation (timeout: 8 minutes)..."
+    echo "📋 Installation command:"
+    echo "   helm install $NEW_RELEASE_NAME eks/aws-load-balancer-controller"
+    echo "   --set clusterName=$CLUSTER_NAME"
+    echo "   --set serviceAccount.name=$SA_TO_USE"
+    echo "   --set region=$AWS_REGION"
+    echo "   --set vpcId=$VPC_ID"
+    echo "   --version 1.14.0"
+    echo ""
     
-    if helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+    # Start Helm installation in background to monitor progress
+    echo "🚀 Starting Helm installation..."
+    helm install "$NEW_RELEASE_NAME" eks/aws-load-balancer-controller \
         -n kube-system \
         --set clusterName="$CLUSTER_NAME" \
         --set serviceAccount.create=false \
@@ -238,13 +350,74 @@ else
         --set region="$AWS_REGION" \
         --set vpcId="$VPC_ID" \
         --version 1.14.0 \
-        --wait --timeout=10m; then
+        --wait --timeout=8m &
+    
+    HELM_PID=$!
+    
+    # Monitor progress while Helm is installing
+    echo "📊 Monitoring installation progress..."
+    MONITOR_COUNT=0
+    while kill -0 $HELM_PID 2>/dev/null; do
+        MONITOR_COUNT=$((MONITOR_COUNT + 1))
         
-        echo "✅ Helm installation completed successfully"
+        echo ""
+        echo "📋 Progress check #$MONITOR_COUNT ($(date '+%H:%M:%S')):"
+        
+        # Check Helm release status
+        RELEASE_STATUS=$(helm status "$NEW_RELEASE_NAME" -n kube-system -o json 2>/dev/null | jq -r '.info.status // "unknown"' 2>/dev/null || echo "installing")
+        echo "   Helm release status: $RELEASE_STATUS"
+        
+        # Check deployment status
+        DEPLOYMENT_STATUS=$(kubectl get deployment -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | awk '{print $2}' | head -1)
+        if [ -n "$DEPLOYMENT_STATUS" ]; then
+            echo "   Deployment status: $DEPLOYMENT_STATUS"
+        else
+            echo "   Deployment status: Not created yet"
+        fi
+        
+        # Check pod status
+        POD_COUNT=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | wc -l)
+        if [ "$POD_COUNT" -gt 0 ]; then
+            echo "   Pod status:"
+            kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | while read pod status ready restarts age; do
+                echo "     $pod: $status ($ready ready, $restarts restarts)"
+            done
+        else
+            echo "   Pod status: No pods created yet"
+        fi
+        
+        sleep 30
+    done
+    
+    # Wait for Helm process to complete and get exit code
+    wait $HELM_PID
+    HELM_EXIT_CODE=$?
+    
+    echo ""
+    if [ $HELM_EXIT_CODE -eq 0 ]; then
+        echo "✅ Helm installation completed successfully!"
+        echo "🎯 New release name: $NEW_RELEASE_NAME"
+        
+        # Show final status
+        echo "📋 Final installation status:"
+        helm status "$NEW_RELEASE_NAME" -n kube-system
+        
     else
-        echo "❌ Helm installation failed"
-        echo "💡 Checking for any partial deployment..."
-        kubectl get deployment -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller || echo "No deployment found"
+        echo "❌ Helm installation failed (exit code: $HELM_EXIT_CODE)"
+        
+        echo "📋 Troubleshooting information:"
+        echo "   Helm release status:"
+        helm status "$NEW_RELEASE_NAME" -n kube-system 2>/dev/null || echo "   Release not found or failed"
+        
+        echo "   Current deployments:"
+        kubectl get deployment -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller || echo "   No deployment found"
+        
+        echo "   Current pods:"
+        kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller || echo "   No pods found"
+        
+        echo "   Recent events:"
+        kubectl get events -n kube-system --sort-by='.lastTimestamp' | tail -10
+        
         exit 1
     fi
 fi
@@ -267,12 +440,52 @@ if [ -n "$LB_DEPLOYMENT" ]; then
     echo "📋 Current deployment status:"
     kubectl get deployment -n kube-system "$DEPLOYMENT_NAME"
     
-    # Wait for deployment to be ready
+    # Wait for deployment to be ready with real-time monitoring
     echo ""
     echo "⏳ Waiting for deployment to be ready (timeout: 5 minutes)..."
     echo "💡 This step ensures all pods are running and healthy"
+    echo "📊 Real-time monitoring of pod startup..."
     
-    if kubectl wait --for=condition=available deployment/"$DEPLOYMENT_NAME" -n kube-system --timeout=300s; then
+    # Start kubectl wait in background
+    kubectl wait --for=condition=available deployment/"$DEPLOYMENT_NAME" -n kube-system --timeout=300s &
+    WAIT_PID=$!
+    
+    # Monitor pod status while waiting
+    WAIT_COUNT=0
+    while kill -0 $WAIT_PID 2>/dev/null; do
+        WAIT_COUNT=$((WAIT_COUNT + 1))
+        
+        echo ""
+        echo "📋 Pod status check #$WAIT_COUNT ($(date '+%H:%M:%S')):"
+        
+        # Show deployment status
+        CURRENT_STATUS=$(kubectl get deployment -n kube-system "$DEPLOYMENT_NAME" --no-headers 2>/dev/null | awk '{print $2}')
+        echo "   Deployment: $CURRENT_STATUS"
+        
+        # Show detailed pod status
+        kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | while read pod status ready restarts age; do
+            echo "   Pod $pod:"
+            echo "     Status: $status"
+            echo "     Ready: $ready"
+            echo "     Restarts: $restarts"
+            echo "     Age: $age"
+            
+            # Show pod events if not running
+            if [ "$status" != "Running" ]; then
+                echo "     Recent events:"
+                kubectl describe pod "$pod" -n kube-system | grep -A 5 "Events:" | tail -5 | sed 's/^/       /'
+            fi
+        done
+        
+        sleep 20
+    done
+    
+    # Get the wait result
+    wait $WAIT_PID
+    WAIT_EXIT_CODE=$?
+    
+    echo ""
+    if [ $WAIT_EXIT_CODE -eq 0 ]; then
         echo "✅ AWS Load Balancer Controller deployment is ready!"
         
         # Show final pod status
