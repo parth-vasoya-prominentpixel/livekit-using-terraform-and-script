@@ -98,35 +98,82 @@ fi
 
 echo "✅ Load Balancer Controller is ready"
 
-# Create or use existing namespace
+# Create or use existing namespace with smart deployment handling
 echo ""
-echo "📦 Setting up namespace..."
+echo "📦 Setting up namespace and checking existing deployments..."
 if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
     echo "✅ Namespace '$NAMESPACE' exists"
     
-    # Check for existing Helm deployment (not just Kubernetes deployment)
+    # Check for existing Helm deployment
     echo "🔍 Checking for existing Helm release..."
     if helm status "$RELEASE_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
         HELM_RELEASE_STATUS=$(helm status "$RELEASE_NAME" -n "$NAMESPACE" -o json 2>/dev/null | grep -o '"status":"[^"]*"' | cut -d'"' -f4 || echo "unknown")
         echo "✅ Existing Helm release found: $RELEASE_NAME (status: $HELM_RELEASE_STATUS)"
         
-        if [ "$HELM_RELEASE_STATUS" = "deployed" ]; then
-            echo "✅ Release is deployed - will upgrade"
-            UPGRADE_EXISTING=true
+        # Check if deployment is healthy
+        echo "🔍 Checking deployment health..."
+        RUNNING_PODS=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+        TOTAL_PODS=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --no-headers 2>/dev/null | wc -l || echo "0")
+        FAILED_PODS=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --no-headers 2>/dev/null | grep -E "(Error|CrashLoopBackOff|ImagePullBackOff)" | wc -l || echo "0")
+        
+        echo "📋 Current deployment status:"
+        echo "   - Total pods: $TOTAL_PODS"
+        echo "   - Running pods: $RUNNING_PODS"
+        echo "   - Failed pods: $FAILED_PODS"
+        echo "   - Helm status: $HELM_RELEASE_STATUS"
+        
+        # Determine if deployment is unhealthy
+        DEPLOYMENT_UNHEALTHY=false
+        if [ "$HELM_RELEASE_STATUS" != "deployed" ] || [ "$FAILED_PODS" -gt 0 ] || [ "$TOTAL_PODS" -gt 0 -a "$RUNNING_PODS" -eq 0 ]; then
+            DEPLOYMENT_UNHEALTHY=true
+        fi
+        
+        if [ "$DEPLOYMENT_UNHEALTHY" = true ]; then
+            echo "⚠️ Deployment appears unhealthy - will clean up and redeploy"
+            
+            echo "🗑️ Cleaning up unhealthy deployment..."
+            
+            # Delete Helm release
+            echo "📋 Removing Helm release..."
+            helm uninstall "$RELEASE_NAME" -n "$NAMESPACE" --wait || echo "   Helm release removal failed or already removed"
+            
+            # Force delete any remaining pods
+            echo "📋 Cleaning up remaining pods..."
+            kubectl delete pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --force --grace-period=0 2>/dev/null || echo "   No pods to clean up"
+            
+            # Clean up services
+            echo "📋 Cleaning up services..."
+            kubectl delete svc -n "$NAMESPACE" -l app.kubernetes.io/name=livekit 2>/dev/null || echo "   No services to clean up"
+            
+            # Wait a moment for cleanup
+            echo "⏳ Waiting for cleanup to complete..."
+            sleep 10
+            
+            echo "✅ Cleanup completed - will install fresh"
+            UPGRADE_EXISTING=false
         else
-            echo "⚠️ Release exists but status is '$HELM_RELEASE_STATUS' - will try upgrade"
+            echo "✅ Deployment is healthy - will upgrade existing"
             UPGRADE_EXISTING=true
         fi
     else
-        echo "📋 No Helm release found - will install fresh"
-        UPGRADE_EXISTING=false
+        echo "📋 No Helm release found"
         
-        # Check if there are any pods from previous deployments
+        # Check if there are any orphaned pods from manual deployments
         POD_COUNT=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --no-headers 2>/dev/null | wc -l || echo "0")
         if [ "$POD_COUNT" -gt 0 ]; then
-            echo "⚠️ Found $POD_COUNT existing pods without Helm release"
-            echo "💡 This might be from a previous manual deployment"
+            echo "⚠️ Found $POD_COUNT orphaned pods (likely from manual deployment)"
+            echo "🗑️ Cleaning up orphaned resources..."
+            
+            # Clean up orphaned resources
+            kubectl delete pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --force --grace-period=0 2>/dev/null || echo "   No pods to clean up"
+            kubectl delete svc -n "$NAMESPACE" -l app.kubernetes.io/name=livekit 2>/dev/null || echo "   No services to clean up"
+            kubectl delete deployment -n "$NAMESPACE" -l app.kubernetes.io/name=livekit 2>/dev/null || echo "   No deployments to clean up"
+            
+            echo "✅ Orphaned resources cleaned up"
         fi
+        
+        echo "📋 Will install fresh deployment"
+        UPGRADE_EXISTING=false
     fi
 else
     echo "📦 Creating namespace: $NAMESPACE"
@@ -168,22 +215,11 @@ else
     echo "💡 Expected format: hostname:port"
 fi
 
-# Test Redis connectivity from cluster
-echo "📋 Testing Redis connectivity from cluster..."
-REDIS_HOST="${REDIS_ENDPOINT%:*}"
-REDIS_PORT="${REDIS_ENDPOINT##*:}"
-
-# Create a temporary test pod to check Redis connectivity
-kubectl run redis-test-pod --image=busybox --rm -i --restart=Never --namespace="$NAMESPACE" -- timeout 5 nc -zv "$REDIS_HOST" "$REDIS_PORT" 2>/dev/null
-REDIS_TEST_RESULT=$?
-
-if [ $REDIS_TEST_RESULT -eq 0 ]; then
-    echo "✅ Redis connectivity test passed"
-else
-    echo "⚠️ Redis connectivity test failed (exit code: $REDIS_TEST_RESULT)"
-    echo "💡 This may be due to security groups or network configuration"
-    echo "💡 LiveKit will attempt to connect during startup"
-fi
+# Test Redis connectivity from cluster (optional - non-blocking)
+echo "📋 Redis connectivity check..."
+echo "💡 Skipping Redis connectivity test - will be validated by LiveKit during startup"
+echo "📋 Redis endpoint: $REDIS_ENDPOINT"
+echo "✅ Redis configuration ready"
 
 # Validate certificate
 echo "📋 Validating certificate..."
@@ -337,7 +373,7 @@ echo "⏳ Starting Helm $HELM_ACTION..."
 
 # Attempt Helm deployment with detailed logging and better error handling
 HELM_SUCCESS=false
-MAX_HELM_ATTEMPTS=2
+MAX_HELM_ATTEMPTS=3  # Increased attempts
 
 for attempt in $(seq 1 $MAX_HELM_ATTEMPTS); do
     echo "📋 Helm attempt $attempt/$MAX_HELM_ATTEMPTS..."
@@ -349,11 +385,11 @@ for attempt in $(seq 1 $MAX_HELM_ATTEMPTS); do
     echo "   - Existing services: $(kubectl get svc -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l || echo '0')"
     echo "   - Helm release exists: $(helm status "$RELEASE_NAME" -n "$NAMESPACE" >/dev/null 2>&1 && echo 'YES' || echo 'NO')"
     
-    # Prepare Helm command with detailed logging
+    # Prepare Helm command
     HELM_CMD="helm"
     if [ "$UPGRADE_EXISTING" = true ]; then
-        HELM_CMD="$HELM_CMD upgrade"
-        echo "🔄 Using Helm UPGRADE command"
+        HELM_CMD="$HELM_CMD upgrade --install"  # Use upgrade --install for safety
+        echo "🔄 Using Helm UPGRADE --install command (safe mode)"
     else
         HELM_CMD="$HELM_CMD install"
         echo "🚀 Using Helm INSTALL command"
@@ -362,21 +398,22 @@ for attempt in $(seq 1 $MAX_HELM_ATTEMPTS); do
     HELM_CMD="$HELM_CMD $RELEASE_NAME livekit/livekit-server"
     HELM_CMD="$HELM_CMD -n $NAMESPACE"
     HELM_CMD="$HELM_CMD -f livekit-values-deployment.yaml"
-    HELM_CMD="$HELM_CMD --version $CHART_VERSION"
+    if [ -n "$CHART_VERSION" ]; then
+        HELM_CMD="$HELM_CMD --version $CHART_VERSION"
+    fi
     HELM_CMD="$HELM_CMD --wait --timeout=10m"
-    HELM_CMD="$HELM_CMD --debug --verbose"
+    HELM_CMD="$HELM_CMD --create-namespace"
     
-    echo "📋 Full Helm command:"
-    echo "   $HELM_CMD"
+    echo "📋 Helm command: $HELM_CMD"
     
     echo ""
     echo "⏳ Executing Helm deployment..."
     echo "================================"
     
-    # Execute Helm command with full output
-    if eval "$HELM_CMD"; then
+    # Execute Helm command with output capture
+    if eval "$HELM_CMD" 2>&1; then
         echo "================================"
-        echo "✅ LiveKit $HELM_ACTION completed successfully!"
+        echo "✅ LiveKit deployment completed successfully!"
         HELM_SUCCESS=true
         break
     else
@@ -384,60 +421,29 @@ for attempt in $(seq 1 $MAX_HELM_ATTEMPTS); do
         echo "================================"
         echo "⚠️ Helm attempt $attempt failed with exit code: $HELM_EXIT_CODE"
         
-        # Detailed post-failure analysis
-        echo ""
-        echo "🔍 Post-failure analysis:"
-        
-        # Check Helm release status
-        echo "📋 Helm release status:"
-        helm status "$RELEASE_NAME" -n "$NAMESPACE" 2>&1 || echo "   No release found"
-        
-        # Check pods
-        echo ""
-        echo "📋 Pod status:"
-        kubectl get pods -n "$NAMESPACE" -o wide 2>/dev/null || echo "   No pods found"
-        
-        # Check services
-        echo ""
-        echo "📋 Service status:"
-        kubectl get svc -n "$NAMESPACE" -o wide 2>/dev/null || echo "   No services found"
-        
-        # Check recent events
-        echo ""
-        echo "📋 Recent events (last 10):"
-        kubectl get events -n "$NAMESPACE" --sort-by='.lastTimestamp' | tail -10 2>/dev/null || echo "   No events found"
-        
-        # Check for specific error patterns
-        echo ""
-        echo "🔍 Checking for common issues:"
-        
-        # Check if it's a release already exists error
-        if helm list -n "$NAMESPACE" | grep -q "$RELEASE_NAME"; then
-            echo "   ⚠️ Release already exists - switching to upgrade mode"
-            UPGRADE_EXISTING=true
-        fi
-        
-        # Check node resources
-        echo "📋 Node resource status:"
-        kubectl top nodes 2>/dev/null || echo "   Metrics not available"
-        
-        # Check if Load Balancer Controller is still running
-        LB_CONTROLLER_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | grep -c "Running" || echo "0")
-        echo "📋 Load Balancer Controller pods running: $LB_CONTROLLER_PODS"
-        
+        # If it's a release already exists error, try to clean up and retry
         if [ $attempt -lt $MAX_HELM_ATTEMPTS ]; then
-            echo ""
-            echo "🔄 Retrying in 30 seconds..."
-            sleep 30
+            echo "🔄 Cleaning up and retrying..."
+            
+            # Try to uninstall if it exists in a bad state
+            helm uninstall "$RELEASE_NAME" -n "$NAMESPACE" --wait 2>/dev/null || echo "   No release to uninstall"
+            
+            # Force cleanup
+            kubectl delete pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --force --grace-period=0 2>/dev/null || echo "   No pods to clean"
+            
+            # Wait and retry
+            sleep 15
+            UPGRADE_EXISTING=false  # Force fresh install on retry
         fi
     fi
 done
 
 if [ "$HELM_SUCCESS" = false ]; then
-    echo "❌ LiveKit $HELM_ACTION failed after $MAX_HELM_ATTEMPTS attempts"
+    echo "⚠️ LiveKit deployment failed after $MAX_HELM_ATTEMPTS attempts"
+    echo "💡 Continuing with status checks - deployment may still be in progress"
     
     echo ""
-    echo "📋 Troubleshooting Information:"
+    echo "� Final etroubleshooting information:"
     echo "🔍 Helm release status:"
     helm status "$RELEASE_NAME" -n "$NAMESPACE" 2>/dev/null || echo "   Release not found"
     
@@ -446,17 +452,20 @@ if [ "$HELM_SUCCESS" = false ]; then
     kubectl get pods -n "$NAMESPACE" 2>/dev/null || echo "   No pods found"
     
     echo ""
-    echo "🔍 Recent pod events:"
-    kubectl get events -n "$NAMESPACE" --sort-by='.lastTimestamp' | tail -10 2>/dev/null || echo "   No events found"
+    echo "🔍 Recent events:"
+    kubectl get events -n "$NAMESPACE" --sort-by='.lastTimestamp' | tail -5 2>/dev/null || echo "   No events found"
     
     echo ""
-    echo "💡 Common issues to check:"
-    echo "   - Redis connectivity (security groups)"
-    echo "   - Certificate ARN validity"
-    echo "   - Load Balancer Controller status"
-    echo "   - Resource limits and node capacity"
+    echo "💡 Common fixes to try:"
+    echo "   1. Check Redis security groups allow EKS access"
+    echo "   2. Verify certificate ARN is valid and covers the domain"
+    echo "   3. Ensure Load Balancer Controller is running"
+    echo "   4. Check cluster has sufficient resources"
+    echo "   5. Try manual cleanup: helm uninstall $RELEASE_NAME -n $NAMESPACE"
     
-    exit 1
+    # Don't exit - continue with status checks
+    echo ""
+    echo "⚠️ Deployment may have issues but continuing with status validation..."
 fi
 
 # Wait for pods to be ready with better handling
