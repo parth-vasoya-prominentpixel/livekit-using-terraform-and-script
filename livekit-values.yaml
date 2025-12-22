@@ -9,7 +9,7 @@ livekit:
     port_range_start: 50000
     port_range_end: 60000
   redis:
-    address: "REDIS_ENDPOINT_PLACEHOLDER"  # This will be replaced by the deployment script
+    address: "lp-ec-redis-use1-dev-redis.x4ncn3.ng.0001.use1.cache.amazonaws.com:6379"
   keys:
     APIKmrHi78hxpbd: Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB
   metrics:

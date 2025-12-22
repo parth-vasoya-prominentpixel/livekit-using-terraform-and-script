@@ -35,30 +35,12 @@ if [ -z "$REDIS_ENDPOINT" ]; then
     exit 1
 fi
 
-# Get Redis endpoint dynamically from AWS
-echo "🔍 Getting correct Redis endpoint..."
+# Get Redis endpoint - use correct hardcoded endpoint
+echo "🔍 Setting correct Redis endpoint..."
 
-# First try to get from environment variable, then from AWS CLI
-if [ -n "$REDIS_ENDPOINT" ] && [[ "$REDIS_ENDPOINT" == *".cache.amazonaws.com:6379" ]]; then
-    echo "📋 Using provided Redis endpoint: $REDIS_ENDPOINT"
-else
-    echo "🔍 Getting Redis primary endpoint from AWS..."
-    
-    # Get the correct Redis primary endpoint
-    REDIS_PRIMARY_ENDPOINT=$(aws elasticache describe-replication-groups \
-        --region "$AWS_REGION" \
-        --query "ReplicationGroups[?contains(ReplicationGroupId, 'redis') && contains(ReplicationGroupId, 'use1-dev')].NodeGroups[0].PrimaryEndpoint.Address" \
-        --output text 2>/dev/null | head -1)
-    
-    if [ -n "$REDIS_PRIMARY_ENDPOINT" ] && [ "$REDIS_PRIMARY_ENDPOINT" != "None" ]; then
-        REDIS_ENDPOINT="${REDIS_PRIMARY_ENDPOINT}:6379"
-        echo "✅ Found Redis primary endpoint: $REDIS_ENDPOINT"
-    else
-        # Use the correct endpoint you provided
-        REDIS_ENDPOINT="lp-ec-redis-use1-dev-redis.x4ncn3.ng.0001.use1.cache.amazonaws.com:6379"
-        echo "💡 Using known correct Redis endpoint: $REDIS_ENDPOINT"
-    fi
-fi
+# Hardcode the correct Redis endpoint
+REDIS_ENDPOINT="lp-ec-redis-use1-dev-redis.x4ncn3.ng.0001.use1.cache.amazonaws.com:6379"
+echo "✅ Using correct Redis endpoint: $REDIS_ENDPOINT"
 
 # Set configuration
 AWS_REGION=${AWS_REGION:-us-east-1}
