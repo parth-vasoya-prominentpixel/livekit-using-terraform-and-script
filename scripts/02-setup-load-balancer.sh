@@ -204,6 +204,13 @@ echo "   Cluster: $CLUSTER_NAME"
 echo "   VPC ID: $VPC_ID"
 echo "   Region: $AWS_REGION"
 
+# Clean up any conflicting secrets from previous installations
+echo ""
+echo "🔧 Cleaning up potential conflicts..."
+kubectl delete secret aws-load-balancer-tls -n kube-system 2>/dev/null || true
+kubectl delete secret aws-load-balancer-webhook-tls -n kube-system 2>/dev/null || true
+echo "✅ Cleanup completed"
+
 helm install "$RELEASE_NAME" eks/aws-load-balancer-controller \
     -n kube-system \
     --set clusterName="$CLUSTER_NAME" \
