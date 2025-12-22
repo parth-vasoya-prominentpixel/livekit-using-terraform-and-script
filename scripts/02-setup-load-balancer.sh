@@ -204,11 +204,38 @@ echo "   Cluster: $CLUSTER_NAME"
 echo "   VPC ID: $VPC_ID"
 echo "   Region: $AWS_REGION"
 
-# Clean up any conflicting secrets from previous installations
+# Clean up any conflicting resources from previous installations
 echo ""
 echo "🔧 Cleaning up potential conflicts..."
+echo "📋 Removing leftover resources from previous Load Balancer Controller installations..."
+
+# Remove conflicting secrets
 kubectl delete secret aws-load-balancer-tls -n kube-system 2>/dev/null || true
 kubectl delete secret aws-load-balancer-webhook-tls -n kube-system 2>/dev/null || true
+
+# Remove conflicting services
+kubectl delete service aws-load-balancer-webhook-service -n kube-system 2>/dev/null || true
+
+# Remove conflicting deployments
+kubectl delete deployment aws-load-balancer-controller -n kube-system 2>/dev/null || true
+
+# Remove conflicting validating webhook configurations
+kubectl delete validatingwebhookconfiguration aws-load-balancer-webhook 2>/dev/null || true
+
+# Remove conflicting mutating webhook configurations  
+kubectl delete mutatingwebhookconfiguration aws-load-balancer-webhook 2>/dev/null || true
+
+# Remove conflicting cluster roles and bindings
+kubectl delete clusterrole aws-load-balancer-controller 2>/dev/null || true
+kubectl delete clusterrolebinding aws-load-balancer-controller 2>/dev/null || true
+
+# Remove conflicting roles and bindings in kube-system
+kubectl delete role aws-load-balancer-controller-leader-election -n kube-system 2>/dev/null || true
+kubectl delete rolebinding aws-load-balancer-controller-leader-election -n kube-system 2>/dev/null || true
+
+# Wait a moment for cleanup to complete
+sleep 5
+
 echo "✅ Cleanup completed"
 
 helm install "$RELEASE_NAME" eks/aws-load-balancer-controller \
