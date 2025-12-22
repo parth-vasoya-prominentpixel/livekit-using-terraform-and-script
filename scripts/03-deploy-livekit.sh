@@ -122,7 +122,7 @@ fi
 echo ""
 echo "📦 Setting up LiveKit Helm repository..."
 helm repo remove livekit >/dev/null 2>&1 || true
-helm repo add livekit https://livekit.github.io/charts
+helm repo add livekit https://helm.livekit.io
 helm repo update
 
 echo "✅ Official LiveKit Helm repository ready"
@@ -194,64 +194,19 @@ else
     echo "⚠️ Certificate status: $CERT_STATUS (may cause issues)"
 fi
 
-# Create LiveKit configuration
+# Create LiveKit configuration from template
 echo ""
 echo "🔧 Creating LiveKit configuration..."
 cd "$(dirname "$0")/.."
 
-cat > "livekit-values-deployment.yaml" << EOF
-# LiveKit Configuration - ALB Only
-# Domain: $DOMAIN
+# Copy the template and replace placeholders
+cp livekit-values.yaml livekit-values-deployment.yaml
 
-livekit:
-  domain: "$DOMAIN"
-  rtc:
-    use_external_ip: true
-    port_range_start: 50000
-    port_range_end: 60000
-  redis:
-    address: "$REDIS_ENDPOINT"
-  keys:
-    APIKmrHi78hxpbd: Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB
-  metrics:
-    enabled: true
-    prometheus:
-      enabled: true
-      port: 6789
-  resources:
-    requests:
-      cpu: 500m
-      memory: 512Mi
-    limits:
-      cpu: 2000m
-      memory: 2Gi
-  affinity:
-    podAntiAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        - labelSelector:
-            matchExpressions:
-              - key: app
-                operator: In
-                values:
-                  - livekit-livekit-server
-          topologyKey: "kubernetes.io/hostname"
+# Replace placeholders with actual values
+sed -i "s|REDIS_ENDPOINT_PLACEHOLDER|$REDIS_ENDPOINT|g" livekit-values-deployment.yaml
+sed -i "s|CERTIFICATE_ARN_PLACEHOLDER|$CERT_ARN|g" livekit-values-deployment.yaml
 
-turn:
-  enabled: true
-  domain: "$TURN_DOMAIN"
-  tls_port: 3478
-  udp_port: 3478
-
-loadBalancer:
-  type: alb
-  tls:
-    - hosts:
-        - "$DOMAIN"
-      certificateArn: "$CERT_ARN"
-
-EOF
-
-echo "✅ LiveKit configuration created"
+echo "✅ LiveKit configuration created from template"
 
 # Deploy or upgrade LiveKit
 CHART_VERSION="1.9.0"  # Latest stable version
@@ -269,7 +224,7 @@ fi
 echo "📋 Deployment details:"
 echo "   Action: $HELM_ACTION"
 echo "   Release: $RELEASE_NAME"
-echo "   Chart: livekit/livekit"
+echo "   Chart: livekit/livekit-server"
 echo "   Chart Version: $CHART_VERSION"
 echo "   Namespace: $NAMESPACE"
 
@@ -283,7 +238,7 @@ MAX_HELM_ATTEMPTS=2
 for attempt in $(seq 1 $MAX_HELM_ATTEMPTS); do
     echo "📋 Helm attempt $attempt/$MAX_HELM_ATTEMPTS..."
     
-    if helm "$HELM_ACTION" "$RELEASE_NAME" livekit/livekit \
+    if helm "$HELM_ACTION" "$RELEASE_NAME" livekit/livekit-server \
         -n "$NAMESPACE" \
         -f livekit-values-deployment.yaml \
         --version "$CHART_VERSION" \
@@ -497,8 +452,8 @@ echo "   - Describe pods: kubectl describe pods -n $NAMESPACE"
 echo "   - Check events: kubectl get events -n $NAMESPACE --sort-by='.lastTimestamp'"
 echo "   - Helm status: helm status $RELEASE_NAME -n $NAMESPACE"
 echo ""
-echo "💡 Uses official LiveKit Helm repository: https://livekit.github.io/charts"
-echo "💡 Uses correct chart: livekit/livekit (not livekit-server)"
+echo "💡 Uses official LiveKit Helm repository: https://helm.livekit.io"
+echo "💡 Uses correct chart: livekit/livekit-server"
 
 # Final validation
 echo ""

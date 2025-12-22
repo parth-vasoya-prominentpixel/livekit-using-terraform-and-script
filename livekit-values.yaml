@@ -1,0 +1,49 @@
+# LiveKit Helm Values Configuration
+# Domain: livekit-eks-tf.digi-telephony.com
+# TURN Domain: turn-eks-tf.digi-telephony.com
+
+livekit:
+  domain: "livekit-eks-tf.digi-telephony.com"
+  rtc:
+    use_external_ip: true
+    port_range_start: 50000
+    port_range_end: 60000
+  redis:
+    address: "REDIS_ENDPOINT_PLACEHOLDER"  # This will be replaced by the deployment script
+  keys:
+    APIKmrHi78hxpbd: Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB
+  metrics:
+    enabled: true
+    prometheus:
+      enabled: true
+      port: 6789
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - livekit-livekit-server
+          topologyKey: "kubernetes.io/hostname"
+
+turn:
+  enabled: true
+  domain: "turn-eks-tf.digi-telephony.com"
+  tls_port: 3478
+  udp_port: 3478
+
+loadBalancer:
+  type: alb
+  tls:
+    - hosts:
+        - "livekit-eks-tf.digi-telephony.com"
+      certificateArn: "CERTIFICATE_ARN_PLACEHOLDER"  # This will be replaced by the deployment script
