@@ -104,13 +104,29 @@ echo "📦 Setting up namespace..."
 if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
     echo "✅ Namespace '$NAMESPACE' exists"
     
-    # Check for existing deployment
-    if kubectl get deployment -n "$NAMESPACE" -l app.kubernetes.io/name=livekit >/dev/null 2>&1; then
-        echo "✅ Existing LiveKit deployment found - will upgrade"
-        UPGRADE_EXISTING=true
+    # Check for existing Helm deployment (not just Kubernetes deployment)
+    echo "🔍 Checking for existing Helm release..."
+    if helm status "$RELEASE_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
+        HELM_RELEASE_STATUS=$(helm status "$RELEASE_NAME" -n "$NAMESPACE" -o json 2>/dev/null | grep -o '"status":"[^"]*"' | cut -d'"' -f4 || echo "unknown")
+        echo "✅ Existing Helm release found: $RELEASE_NAME (status: $HELM_RELEASE_STATUS)"
+        
+        if [ "$HELM_RELEASE_STATUS" = "deployed" ]; then
+            echo "✅ Release is deployed - will upgrade"
+            UPGRADE_EXISTING=true
+        else
+            echo "⚠️ Release exists but status is '$HELM_RELEASE_STATUS' - will try upgrade"
+            UPGRADE_EXISTING=true
+        fi
     else
-        echo "✅ Namespace ready for new deployment"
+        echo "📋 No Helm release found - will install fresh"
         UPGRADE_EXISTING=false
+        
+        # Check if there are any pods from previous deployments
+        POD_COUNT=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --no-headers 2>/dev/null | wc -l || echo "0")
+        if [ "$POD_COUNT" -gt 0 ]; then
+            echo "⚠️ Found $POD_COUNT existing pods without Helm release"
+            echo "💡 This might be from a previous manual deployment"
+        fi
     fi
 else
     echo "📦 Creating namespace: $NAMESPACE"
@@ -126,6 +142,70 @@ helm repo add livekit https://helm.livekit.io
 helm repo update
 
 echo "✅ Official LiveKit Helm repository ready"
+
+# Pre-deployment validation
+echo ""
+echo "🔍 Pre-deployment validation..."
+echo "==============================="
+
+# Check Helm chart availability
+echo "📋 Checking Helm chart availability..."
+if helm search repo livekit/livekit-server --version "$CHART_VERSION" >/dev/null 2>&1; then
+    echo "✅ Chart livekit/livekit-server version $CHART_VERSION is available"
+else
+    echo "⚠️ Chart version $CHART_VERSION not found, checking available versions:"
+    helm search repo livekit/livekit-server --versions | head -5
+    echo "💡 Using latest available version"
+    CHART_VERSION=""  # Let Helm use the latest
+fi
+
+# Validate Redis endpoint format
+echo "📋 Validating Redis endpoint format..."
+if [[ "$REDIS_ENDPOINT" =~ ^[a-zA-Z0-9.-]+:[0-9]+$ ]]; then
+    echo "✅ Redis endpoint format is valid: $REDIS_ENDPOINT"
+else
+    echo "⚠️ Redis endpoint format may be invalid: $REDIS_ENDPOINT"
+    echo "💡 Expected format: hostname:port"
+fi
+
+# Test Redis connectivity from cluster
+echo "📋 Testing Redis connectivity from cluster..."
+REDIS_HOST="${REDIS_ENDPOINT%:*}"
+REDIS_PORT="${REDIS_ENDPOINT##*:}"
+
+# Create a temporary test pod to check Redis connectivity
+kubectl run redis-test-pod --image=busybox --rm -i --restart=Never --namespace="$NAMESPACE" -- timeout 5 nc -zv "$REDIS_HOST" "$REDIS_PORT" 2>/dev/null
+REDIS_TEST_RESULT=$?
+
+if [ $REDIS_TEST_RESULT -eq 0 ]; then
+    echo "✅ Redis connectivity test passed"
+else
+    echo "⚠️ Redis connectivity test failed (exit code: $REDIS_TEST_RESULT)"
+    echo "💡 This may be due to security groups or network configuration"
+    echo "💡 LiveKit will attempt to connect during startup"
+fi
+
+# Validate certificate
+echo "📋 Validating certificate..."
+if aws acm describe-certificate --certificate-arn "$CERT_ARN" --region "$AWS_REGION" >/dev/null 2>&1; then
+    CERT_STATUS=$(aws acm describe-certificate --certificate-arn "$CERT_ARN" --region "$AWS_REGION" --query "Certificate.Status" --output text)
+    CERT_DOMAINS=$(aws acm describe-certificate --certificate-arn "$CERT_ARN" --region "$AWS_REGION" --query "Certificate.SubjectAlternativeNames" --output text)
+    echo "✅ Certificate is valid (status: $CERT_STATUS)"
+    echo "📋 Certificate covers domains: $CERT_DOMAINS"
+    
+    # Check if our domain is covered
+    if echo "$CERT_DOMAINS" | grep -q "$DOMAIN\|*.digi-telephony.com"; then
+        echo "✅ Certificate covers our domain: $DOMAIN"
+    else
+        echo "⚠️ Certificate may not cover our domain: $DOMAIN"
+        echo "💡 Covered domains: $CERT_DOMAINS"
+    fi
+else
+    echo "❌ Certificate validation failed: $CERT_ARN"
+    echo "💡 Check if the certificate ARN is correct and in the right region"
+fi
+
+echo "==============================="
 
 # Get cluster information
 echo ""
@@ -199,6 +279,13 @@ echo ""
 echo "🔧 Creating LiveKit configuration..."
 cd "$(dirname "$0")/.."
 
+# Verify template file exists
+if [ ! -f "livekit-values.yaml" ]; then
+    echo "❌ Template file 'livekit-values.yaml' not found"
+    echo "💡 Make sure you're running this script from the correct directory"
+    exit 1
+fi
+
 # Copy the template and replace placeholders
 cp livekit-values.yaml livekit-values-deployment.yaml
 
@@ -207,6 +294,23 @@ sed -i "s|REDIS_ENDPOINT_PLACEHOLDER|$REDIS_ENDPOINT|g" livekit-values-deploymen
 sed -i "s|CERTIFICATE_ARN_PLACEHOLDER|$CERT_ARN|g" livekit-values-deployment.yaml
 
 echo "✅ LiveKit configuration created from template"
+
+# Validate the configuration file
+echo ""
+echo "🔍 Validating configuration file..."
+echo "📋 Configuration preview:"
+echo "   Redis endpoint: $(grep -A1 'redis:' livekit-values-deployment.yaml | grep 'address:' | cut -d'"' -f2)"
+echo "   Certificate ARN: $(grep 'certificateArn:' livekit-values-deployment.yaml | cut -d'"' -f2)"
+echo "   Domain: $(grep -A1 'livekit:' livekit-values-deployment.yaml | grep 'domain:' | cut -d'"' -f2)"
+
+# Check if placeholders were properly replaced
+if grep -q "PLACEHOLDER" livekit-values-deployment.yaml; then
+    echo "❌ Configuration contains unreplaced placeholders:"
+    grep "PLACEHOLDER" livekit-values-deployment.yaml
+    exit 1
+fi
+
+echo "✅ Configuration validation passed"
 
 # Deploy or upgrade LiveKit
 CHART_VERSION="1.9.0"  # Latest stable version
@@ -231,26 +335,98 @@ echo "   Namespace: $NAMESPACE"
 echo ""
 echo "⏳ Starting Helm $HELM_ACTION..."
 
-# Attempt Helm deployment with better error handling
+# Attempt Helm deployment with detailed logging and better error handling
 HELM_SUCCESS=false
 MAX_HELM_ATTEMPTS=2
 
 for attempt in $(seq 1 $MAX_HELM_ATTEMPTS); do
     echo "📋 Helm attempt $attempt/$MAX_HELM_ATTEMPTS..."
     
-    if helm "$HELM_ACTION" "$RELEASE_NAME" livekit/livekit-server \
-        -n "$NAMESPACE" \
-        -f livekit-values-deployment.yaml \
-        --version "$CHART_VERSION" \
-        --wait --timeout=10m; then
-        
+    # Show detailed pre-deployment information
+    echo "🔍 Pre-deployment checks:"
+    echo "   - Namespace: $(kubectl get namespace "$NAMESPACE" -o jsonpath='{.metadata.name}' 2>/dev/null || echo 'NOT FOUND')"
+    echo "   - Existing pods: $(kubectl get pods -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l || echo '0')"
+    echo "   - Existing services: $(kubectl get svc -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l || echo '0')"
+    echo "   - Helm release exists: $(helm status "$RELEASE_NAME" -n "$NAMESPACE" >/dev/null 2>&1 && echo 'YES' || echo 'NO')"
+    
+    # Prepare Helm command with detailed logging
+    HELM_CMD="helm"
+    if [ "$UPGRADE_EXISTING" = true ]; then
+        HELM_CMD="$HELM_CMD upgrade"
+        echo "🔄 Using Helm UPGRADE command"
+    else
+        HELM_CMD="$HELM_CMD install"
+        echo "🚀 Using Helm INSTALL command"
+    fi
+    
+    HELM_CMD="$HELM_CMD $RELEASE_NAME livekit/livekit-server"
+    HELM_CMD="$HELM_CMD -n $NAMESPACE"
+    HELM_CMD="$HELM_CMD -f livekit-values-deployment.yaml"
+    HELM_CMD="$HELM_CMD --version $CHART_VERSION"
+    HELM_CMD="$HELM_CMD --wait --timeout=10m"
+    HELM_CMD="$HELM_CMD --debug --verbose"
+    
+    echo "📋 Full Helm command:"
+    echo "   $HELM_CMD"
+    
+    echo ""
+    echo "⏳ Executing Helm deployment..."
+    echo "================================"
+    
+    # Execute Helm command with full output
+    if eval "$HELM_CMD"; then
+        echo "================================"
         echo "✅ LiveKit $HELM_ACTION completed successfully!"
         HELM_SUCCESS=true
         break
     else
-        echo "⚠️ Helm attempt $attempt failed"
+        HELM_EXIT_CODE=$?
+        echo "================================"
+        echo "⚠️ Helm attempt $attempt failed with exit code: $HELM_EXIT_CODE"
+        
+        # Detailed post-failure analysis
+        echo ""
+        echo "🔍 Post-failure analysis:"
+        
+        # Check Helm release status
+        echo "📋 Helm release status:"
+        helm status "$RELEASE_NAME" -n "$NAMESPACE" 2>&1 || echo "   No release found"
+        
+        # Check pods
+        echo ""
+        echo "📋 Pod status:"
+        kubectl get pods -n "$NAMESPACE" -o wide 2>/dev/null || echo "   No pods found"
+        
+        # Check services
+        echo ""
+        echo "📋 Service status:"
+        kubectl get svc -n "$NAMESPACE" -o wide 2>/dev/null || echo "   No services found"
+        
+        # Check recent events
+        echo ""
+        echo "📋 Recent events (last 10):"
+        kubectl get events -n "$NAMESPACE" --sort-by='.lastTimestamp' | tail -10 2>/dev/null || echo "   No events found"
+        
+        # Check for specific error patterns
+        echo ""
+        echo "🔍 Checking for common issues:"
+        
+        # Check if it's a release already exists error
+        if helm list -n "$NAMESPACE" | grep -q "$RELEASE_NAME"; then
+            echo "   ⚠️ Release already exists - switching to upgrade mode"
+            UPGRADE_EXISTING=true
+        fi
+        
+        # Check node resources
+        echo "📋 Node resource status:"
+        kubectl top nodes 2>/dev/null || echo "   Metrics not available"
+        
+        # Check if Load Balancer Controller is still running
+        LB_CONTROLLER_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+        echo "📋 Load Balancer Controller pods running: $LB_CONTROLLER_PODS"
         
         if [ $attempt -lt $MAX_HELM_ATTEMPTS ]; then
+            echo ""
             echo "🔄 Retrying in 30 seconds..."
             sleep 30
         fi
