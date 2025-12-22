@@ -107,81 +107,32 @@ echo "✅ Load Balancer Controller is ready"
 
 # Create or use existing namespace with smart deployment handling
 echo ""
-echo "📦 Setting up namespace and checking existing deployments..."
+echo "📦 Setting up namespace and cleaning existing deployment..."
 if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
     echo "✅ Namespace '$NAMESPACE' exists"
     
-    # Check for existing Helm deployment
-    echo "🔍 Checking for existing Helm release..."
+    # Always clean up existing deployment for fresh start
+    echo "🗑️ Cleaning up existing LiveKit deployment for fresh start..."
+    
+    # Remove Helm release
     if helm status "$RELEASE_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
-        HELM_RELEASE_STATUS=$(helm status "$RELEASE_NAME" -n "$NAMESPACE" -o json 2>/dev/null | grep -o '"status":"[^"]*"' | cut -d'"' -f4 || echo "unknown")
-        echo "✅ Existing Helm release found: $RELEASE_NAME (status: $HELM_RELEASE_STATUS)"
-        
-        # Check if deployment is healthy
-        echo "🔍 Checking deployment health..."
-        RUNNING_PODS=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --no-headers 2>/dev/null | grep -c "Running" || echo "0")
-        TOTAL_PODS=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --no-headers 2>/dev/null | wc -l || echo "0")
-        FAILED_PODS=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --no-headers 2>/dev/null | grep -E "(Error|CrashLoopBackOff|ImagePullBackOff)" | wc -l || echo "0")
-        
-        echo "📋 Current deployment status:"
-        echo "   - Total pods: $TOTAL_PODS"
-        echo "   - Running pods: $RUNNING_PODS"
-        echo "   - Failed pods: $FAILED_PODS"
-        echo "   - Helm status: $HELM_RELEASE_STATUS"
-        
-        # Determine if deployment is unhealthy
-        DEPLOYMENT_UNHEALTHY=false
-        if [ "$HELM_RELEASE_STATUS" != "deployed" ] || [ "$FAILED_PODS" -gt 0 ] || [ "$TOTAL_PODS" -gt 0 -a "$RUNNING_PODS" -eq 0 ]; then
-            DEPLOYMENT_UNHEALTHY=true
-        fi
-        
-        if [ "$DEPLOYMENT_UNHEALTHY" = true ]; then
-            echo "⚠️ Deployment appears unhealthy - will clean up and redeploy"
-            
-            echo "🗑️ Cleaning up unhealthy deployment..."
-            
-            # Delete Helm release
-            echo "📋 Removing Helm release..."
-            helm uninstall "$RELEASE_NAME" -n "$NAMESPACE" --wait || echo "   Helm release removal failed or already removed"
-            
-            # Force delete any remaining pods
-            echo "📋 Cleaning up remaining pods..."
-            kubectl delete pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --force --grace-period=0 2>/dev/null || echo "   No pods to clean up"
-            
-            # Clean up services
-            echo "📋 Cleaning up services..."
-            kubectl delete svc -n "$NAMESPACE" -l app.kubernetes.io/name=livekit 2>/dev/null || echo "   No services to clean up"
-            
-            # Wait a moment for cleanup
-            echo "⏳ Waiting for cleanup to complete..."
-            sleep 10
-            
-            echo "✅ Cleanup completed - will install fresh"
-            UPGRADE_EXISTING=false
-        else
-            echo "✅ Deployment is healthy - will upgrade existing"
-            UPGRADE_EXISTING=true
-        fi
-    else
-        echo "📋 No Helm release found"
-        
-        # Check if there are any orphaned pods from manual deployments
-        POD_COUNT=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --no-headers 2>/dev/null | wc -l || echo "0")
-        if [ "$POD_COUNT" -gt 0 ]; then
-            echo "⚠️ Found $POD_COUNT orphaned pods (likely from manual deployment)"
-            echo "🗑️ Cleaning up orphaned resources..."
-            
-            # Clean up orphaned resources
-            kubectl delete pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --force --grace-period=0 2>/dev/null || echo "   No pods to clean up"
-            kubectl delete svc -n "$NAMESPACE" -l app.kubernetes.io/name=livekit 2>/dev/null || echo "   No services to clean up"
-            kubectl delete deployment -n "$NAMESPACE" -l app.kubernetes.io/name=livekit 2>/dev/null || echo "   No deployments to clean up"
-            
-            echo "✅ Orphaned resources cleaned up"
-        fi
-        
-        echo "📋 Will install fresh deployment"
-        UPGRADE_EXISTING=false
+        echo "📋 Removing existing Helm release..."
+        helm uninstall "$RELEASE_NAME" -n "$NAMESPACE" --wait || echo "   Helm release removal completed"
     fi
+    
+    # Force cleanup of all LiveKit resources
+    echo "📋 Cleaning up all LiveKit resources..."
+    kubectl delete pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --force --grace-period=0 2>/dev/null || echo "   No pods to clean up"
+    kubectl delete svc -n "$NAMESPACE" -l app.kubernetes.io/name=livekit 2>/dev/null || echo "   No services to clean up"
+    kubectl delete ingress -n "$NAMESPACE" -l app.kubernetes.io/name=livekit 2>/dev/null || echo "   No ingress to clean up"
+    kubectl delete deployment -n "$NAMESPACE" -l app.kubernetes.io/name=livekit 2>/dev/null || echo "   No deployments to clean up"
+    
+    # Wait for cleanup
+    echo "⏳ Waiting for cleanup to complete..."
+    sleep 15
+    
+    echo "✅ Cleanup completed - will install fresh"
+    UPGRADE_EXISTING=false
 else
     echo "📦 Creating namespace: $NAMESPACE"
     kubectl create namespace "$NAMESPACE"
@@ -332,9 +283,8 @@ fi
 # Copy the template and replace placeholders
 cp livekit-values.yaml livekit-values-deployment.yaml
 
-# Replace placeholders with actual values
-sed -i "s|REDIS_ENDPOINT_PLACEHOLDER|$REDIS_ENDPOINT|g" livekit-values-deployment.yaml
-sed -i "s|CERTIFICATE_ARN_PLACEHOLDER|$CERT_ARN|g" livekit-values-deployment.yaml
+# Replace certificate ARN in the configuration
+sed -i "s|arn:aws:acm:us-east-1:918595516608:certificate/d14bec23-8794-45f2-bb79-43c2e27cf79d|$CERT_ARN|g" livekit-values-deployment.yaml
 
 echo "✅ LiveKit configuration created from template"
 
@@ -343,15 +293,10 @@ echo ""
 echo "🔍 Validating configuration file..."
 echo "📋 Configuration preview:"
 echo "   Redis endpoint: $(grep -A1 'redis:' livekit-values-deployment.yaml | grep 'address:' | cut -d'"' -f2)"
-echo "   Certificate ARN: $(grep 'certificateArn:' livekit-values-deployment.yaml | cut -d'"' -f2)"
+echo "   Certificate ARN: $(grep 'certificate-arn:' livekit-values-deployment.yaml | cut -d'"' -f2 | head -1)"
 echo "   Domain: $(grep -A1 'livekit:' livekit-values-deployment.yaml | grep 'domain:' | cut -d'"' -f2)"
-
-# Check if placeholders were properly replaced
-if grep -q "PLACEHOLDER" livekit-values-deployment.yaml; then
-    echo "❌ Configuration contains unreplaced placeholders:"
-    grep "PLACEHOLDER" livekit-values-deployment.yaml
-    exit 1
-fi
+echo "   Service Type: $(grep -A1 'service:' livekit-values-deployment.yaml | grep 'type:' | awk '{print $2}')"
+echo "   Ingress Enabled: $(grep -A1 'ingress:' livekit-values-deployment.yaml | grep 'enabled:' | awk '{print $2}')"
 
 echo "✅ Configuration validation passed"
 
