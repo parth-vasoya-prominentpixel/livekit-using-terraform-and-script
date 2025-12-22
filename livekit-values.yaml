@@ -41,9 +41,31 @@ turn:
   tls_port: 3478
   udp_port: 3478
 
-loadBalancer:
-  type: alb
+# Ingress configuration for ALB - Internet Facing
+ingress:
+  enabled: true
+  className: "alb"
+  annotations:
+    kubernetes.io/ingress.class: "alb"
+    alb.ingress.kubernetes.io/scheme: "internet-facing"
+    alb.ingress.kubernetes.io/target-type: "ip"
+    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:918595516608:certificate/d14bec23-8794-45f2-bb79-43c2e27cf79d"
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/healthcheck-path: "/rtc"
+    alb.ingress.kubernetes.io/healthcheck-protocol: "HTTP"
+    alb.ingress.kubernetes.io/backend-protocol: "HTTP"
+  hosts:
+    - host: "livekit-eks-tf.digi-telephony.com"
+      paths:
+        - path: /
+          pathType: Prefix
   tls:
-    - hosts:
+    - secretName: livekit-tls
+      hosts:
         - "livekit-eks-tf.digi-telephony.com"
-      certificateArn: "CERTIFICATE_ARN_PLACEHOLDER"  # This will be replaced by the deployment script
+
+# Service configuration - ClusterIP for ALB Ingress
+service:
+  type: ClusterIP
+  port: 7880

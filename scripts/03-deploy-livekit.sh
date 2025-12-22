@@ -120,71 +120,32 @@ echo "✅ Load Balancer Controller is ready"
 
 # Create namespace if needed
 echo ""
-echo "📦 Setting up namespace..."
-if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
-    echo "📦 Creating namespace: $NAMESPACE"
-    kubectl create namespace "$NAMESPACE"
-else
+echo "📦 Setting up namespace and cleaning existing deployment..."
+if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
     echo "✅ Namespace '$NAMESPACE' exists"
-fi
-
-# Check for existing LiveKit deployment and clean up if unhealthy
-echo ""
-echo "🔍 Checking for existing LiveKit deployment..."
-
-# Check if LiveKit deployment exists
-if kubectl get deployment -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server >/dev/null 2>&1; then
-    echo "📋 Found existing LiveKit deployment"
     
-    # Always clean up existing deployment to avoid conflicts
-    echo "🗑️ Cleaning up existing LiveKit deployment to avoid conflicts..."
+    # Always clean up existing deployment for fresh start
+    echo "🗑️ Cleaning up existing LiveKit deployment for fresh start..."
     
-    # Show current status for debugging
-    echo "📋 Current deployment status:"
-    kubectl get deployment -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server 2>/dev/null || echo "   No deployments found"
-    echo "📋 Current pod status:"
-    kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server 2>/dev/null || echo "   No pods found"
-    echo "📋 Current ingress status:"
-    kubectl get ingress -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server 2>/dev/null || echo "   No ingress found"
-    
-    # Remove Helm release if it exists
+    # Remove Helm release
     if helm status "$RELEASE_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
-        echo "🗑️ Uninstalling Helm release: $RELEASE_NAME"
-        helm uninstall "$RELEASE_NAME" -n "$NAMESPACE" --wait || true
+        echo "📋 Removing existing Helm release..."
+        helm uninstall "$RELEASE_NAME" -n "$NAMESPACE" --wait || echo "   Helm release removal completed"
     fi
     
-    # Force delete any remaining resources to avoid conflicts
-    echo "🗑️ Cleaning up remaining resources..."
-    kubectl delete deployment -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server --force --grace-period=0 2>/dev/null || true
-    kubectl delete pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server --force --grace-period=0 2>/dev/null || true
-    kubectl delete svc -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server 2>/dev/null || true
-    kubectl delete configmap -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server 2>/dev/null || true
-    kubectl delete ingress -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server 2>/dev/null || true
-    kubectl delete secret -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server 2>/dev/null || true
+    # Force cleanup of all LiveKit resources
+    echo "📋 Cleaning up all LiveKit resources..."
+    kubectl delete pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --force --grace-period=0 2>/dev/null || echo "   No pods to clean up"
+    kubectl delete svc -n "$NAMESPACE" -l app.kubernetes.io/name=livekit 2>/dev/null || echo "   No services to clean up"
+    kubectl delete ingress -n "$NAMESPACE" -l app.kubernetes.io/name=livekit 2>/dev/null || echo "   No ingress to clean up"
+    kubectl delete deployment -n "$NAMESPACE" -l app.kubernetes.io/name=livekit 2>/dev/null || echo "   No deployments to clean up"
     
-    # Clean up any ALB resources that might conflict
-    echo "🗑️ Cleaning up potential ALB conflicts..."
-    kubectl delete ingress -n "$NAMESPACE" --all 2>/dev/null || true
-    
-    # Wait for cleanup to complete
+    # Wait for cleanup
     echo "⏳ Waiting for cleanup to complete..."
     sleep 15
     
-    # Verify cleanup
-    REMAINING_PODS=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server --no-headers 2>/dev/null | wc -l || echo "0")
-    REMAINING_INGRESS=$(kubectl get ingress -n "$NAMESPACE" --no-headers 2>/dev/null | wc -l || echo "0")
-    
-    if [ "$REMAINING_PODS" -eq 0 ] && [ "$REMAINING_INGRESS" -eq 0 ]; then
-        echo "✅ Cleanup completed successfully"
-    else
-        echo "⚠️ Some resources may still be terminating"
-        [ "$REMAINING_PODS" -gt 0 ] && echo "   - $REMAINING_PODS pods remaining"
-        [ "$REMAINING_INGRESS" -gt 0 ] && echo "   - $REMAINING_INGRESS ingress remaining"
-        echo "📋 Waiting additional time for termination..."
-        sleep 10
-    fi
-    
-    FORCE_FRESH_INSTALL=true
+    echo "✅ Cleanup completed - will install fresh"
+    UPGRADE_EXISTING=false
 else
     echo "✅ No existing LiveKit deployment found"
     FORCE_FRESH_INSTALL=true
@@ -221,24 +182,23 @@ else
     exit 1
 fi
 
-# Verify LiveKit chart is available
-echo "� Verifying  LiveKit chart availability..."
-echo "📋 Searching for available LiveKit charts..."
-helm search repo livekit/
+# Copy the template and replace placeholders
+cp livekit-values.yaml livekit-values-deployment.yaml
 
-# Check for livekit-server chart (correct chart name)
-if helm search repo livekit/livekit-server >/dev/null 2>&1; then
-    echo "✅ LiveKit server chart found"
-    CHART_NAME="livekit-server"
-elif helm search repo livekit/livekit >/dev/null 2>&1; then
-    echo "✅ LiveKit chart found"
-    CHART_NAME="livekit"
-else
-    echo "❌ No LiveKit chart found in repository"
-    echo "📋 Available charts:"
-    helm search repo livekit/ || true
-    exit 1
-fi
+# Replace certificate ARN in the configuration
+sed -i "s|arn:aws:acm:us-east-1:918595516608:certificate/d14bec23-8794-45f2-bb79-43c2e27cf79d|$CERT_ARN|g" livekit-values-deployment.yaml
+
+echo "✅ LiveKit configuration created from template"
+
+# Validate the configuration file
+echo ""
+echo "🔍 Validating configuration file..."
+echo "📋 Configuration preview:"
+echo "   Redis endpoint: $(grep -A1 'redis:' livekit-values-deployment.yaml | grep 'address:' | cut -d'"' -f2)"
+echo "   Certificate ARN: $(grep 'certificate-arn:' livekit-values-deployment.yaml | cut -d'"' -f2 | head -1)"
+echo "   Domain: $(grep -A1 'livekit:' livekit-values-deployment.yaml | grep 'domain:' | cut -d'"' -f2)"
+echo "   Service Type: $(grep -A1 'service:' livekit-values-deployment.yaml | grep 'type:' | awk '{print $2}')"
+echo "   Ingress Enabled: $(grep -A1 'ingress:' livekit-values-deployment.yaml | grep 'enabled:' | awk '{print $2}')"
 
 echo "📋 Using chart: livekit/$CHART_NAME"
 
