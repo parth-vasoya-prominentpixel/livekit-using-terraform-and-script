@@ -298,7 +298,7 @@ jobs:
           AWS_REGION="${{ env.AWS_REGION }}" \
           ./02-setup-load-balancer.sh
 
-  Step 5: Deploy LiveKit (COMMENTED OUT - FOCUS ON LOAD BALANCER FIRST)
+#  Step 5: Deploy LiveKit (COMMENTED OUT - FOCUS ON LOAD BALANCER FIRST)
   deploy-livekit:
     name: 🎥 Step 5 - Deploy LiveKit
     runs-on: ubuntu-latest

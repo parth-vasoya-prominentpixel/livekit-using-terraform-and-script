@@ -145,7 +145,8 @@ wait $SUBNET_PID
 
 echo "✅ VPC ID: $VPC_ID"
 echo "✅ Subnets: $SUBNET_IDS"
-
+# added a script to enter a record in base/main domain for the DOMAIN variables value 
+# claim a certificate for the domain in DOMAIN varable certificate should non exportable 
 # Create or use existing namespace
 NAMESPACE="livekit"
 echo ""
