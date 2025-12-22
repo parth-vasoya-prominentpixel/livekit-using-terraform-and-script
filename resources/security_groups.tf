@@ -40,3 +40,16 @@ resource "aws_security_group" "sip_traffic" {
     Name = "${local.eks_name}-sip-twilio"
   })
 }
+
+# Additional security group rule for EKS to access Redis
+resource "aws_security_group_rule" "eks_to_redis" {
+  type                     = "ingress"
+  from_port                = 6379
+  to_port                  = 6379
+  protocol                 = "tcp"
+  source_security_group_id = module.eks_al2023.cluster_security_group_id
+  security_group_id        = module.redis.security_group_id
+  description              = "Allow EKS cluster to access Redis"
+
+  depends_on = [module.eks_al2023, module.redis]
+}

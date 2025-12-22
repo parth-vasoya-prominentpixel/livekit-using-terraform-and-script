@@ -30,7 +30,7 @@ module "redis" {
   snapshot_window          = "03:00-04:00"
   maintenance_window       = "sun:05:00-sun:06:00"
 
-  # Security group rules - only allow access from EKS cluster
+  # Security group rules - allow access from EKS nodes and cluster
   security_group_rules = {
     ingress_eks_cluster = {
       description                   = "Redis access from EKS cluster security group"
@@ -38,9 +38,27 @@ module "redis" {
       from_port                    = 6379
       to_port                      = 6379
       protocol                     = "tcp"
-      referenced_security_group_id = module.eks_al2023.cluster_primary_security_group_id
+      referenced_security_group_id = module.eks_al2023.cluster_security_group_id
+    }
+    ingress_eks_nodes = {
+      description                   = "Redis access from EKS node security group"
+      type                         = "ingress"
+      from_port                    = 6379
+      to_port                      = 6379
+      protocol                     = "tcp"
+      referenced_security_group_id = module.eks_al2023.node_security_group_id
+    }
+    ingress_private_subnets = {
+      description = "Redis access from private subnets (EKS pods)"
+      type        = "ingress"
+      from_port   = 6379
+      to_port     = 6379
+      protocol    = "tcp"
+      cidr_blocks = module.vpc.private_subnets_cidr_blocks
     }
   }
 
   tags = local.tags
+
+  depends_on = [module.eks_al2023]
 }
