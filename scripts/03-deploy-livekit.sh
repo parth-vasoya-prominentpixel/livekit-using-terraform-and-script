@@ -44,7 +44,7 @@ AWS_REGION=${AWS_REGION:-us-east-1}
 # Set standard names (no unique suffix needed)
 NAMESPACE="livekit"
 RELEASE_NAME="livekit"
-DOMAIN="livekit.digi-telephony.com"
+DOMAIN="livekit-eks-tf.digi-telephony.com"
 
 echo ""
 echo "📋 Configuration:"
@@ -223,32 +223,21 @@ echo "🔧 Creating LiveKit configuration..."
 cd "$(dirname "$0")/.."
 
 cat > "livekit-values.yaml" << EOF
-# LiveKit Production Configuration - Terraform Version
-# Optimized for AWS EKS with unique naming
-
 livekit:
-  # Domain configuration
-  domain: "$DOMAIN"
-  
-  # RTC configuration optimized for AWS
+  domain: $DOMAIN
   rtc:
     use_external_ip: true
     port_range_start: 50000
     port_range_end: 60000
-    tcp_fallback_port: 443
-    
-  # Redis configuration
   redis:
-    address: "$REDIS_ENDPOINT"
-    
-  # API keys
+    address: "$REDIS_ENDPOINT"  # This will be replaced by the deployment script
   keys:
-    $API_KEY: $API_SECRET
-    
-  # Logging
-  log_level: info
-  
-  # Resource configuration (optimized)
+    "$API_KEY": "$API_SECRET"
+  metrics:
+    enabled: true
+    prometheus:
+      enabled: true
+      port: 6789
   resources:
     requests:
       cpu: 500m
@@ -256,101 +245,29 @@ livekit:
     limits:
       cpu: 2000m
       memory: 2Gi
-      
-  # High availability (2 replicas)
-  replicaCount: 2
-  
-  # Pod disruption budget
-  podDisruptionBudget:
-    enabled: true
-    minAvailable: 1
-    
-  # Pod anti-affinity for better distribution
   affinity:
     podAntiAffinity:
-      preferredDuringSchedulingIgnoredDuringExecution:
-        - weight: 100
-          podAffinityTerm:
-            labelSelector:
-              matchExpressions:
-                - key: app.kubernetes.io/name
-                  operator: In
-                  values:
-                    - livekit
-            topologyKey: "kubernetes.io/hostname"
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - livekit-livekit-server
+          topologyKey: "kubernetes.io/hostname"
 
-# Service configuration for AWS NLB (RTC traffic)
-service:
-  type: LoadBalancer
-  annotations:
-    # AWS Load Balancer Controller annotations
-    service.beta.kubernetes.io/aws-load-balancer-type: "external"
-    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
-    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
-    service.beta.kubernetes.io/aws-load-balancer-subnets: "$SUBNET_IDS"
-    # Health check configuration
-    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "HTTP"
-    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: "/health"
-    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "7880"
-    # Performance optimizations
-    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
-  ports:
-    - name: http
-      port: 7880
-      targetPort: 7880
-      protocol: TCP
-    - name: rtc-tcp
-      port: 7881
-      targetPort: 7881
-      protocol: TCP
-
-# Ingress configuration for ALB (HTTP/WebSocket traffic)
-ingress:
+turn:
   enabled: true
-  className: "alb"
-  annotations:
-    # AWS ALB Ingress Controller annotations
-    kubernetes.io/ingress.class: "alb"
-    alb.ingress.kubernetes.io/scheme: "internet-facing"
-    alb.ingress.kubernetes.io/target-type: "ip"
-    alb.ingress.kubernetes.io/subnets: "$SUBNET_IDS"
-    # SSL configuration
-    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:us-east-1:918595516608:certificate/388e3ff7-9763-4772-bfef-56cf64fcc414"
-    alb.ingress.kubernetes.io/ssl-policy: "ELBSecurityPolicy-TLS-1-2-2017-01"
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
-    alb.ingress.kubernetes.io/ssl-redirect: '443'
-    # Health check configuration
-    alb.ingress.kubernetes.io/healthcheck-path: "/health"
-    alb.ingress.kubernetes.io/healthcheck-protocol: "HTTP"
-    alb.ingress.kubernetes.io/healthcheck-port: "7880"
-    # Performance optimizations
-    alb.ingress.kubernetes.io/load-balancer-attributes: "idle_timeout.timeout_seconds=60"
-  hosts:
-    - host: $DOMAIN
-      paths:
-        - path: /
-          pathType: Prefix
-          backend:
-            service:
-              name: livekit
-              port:
-                number: 7880
+  domain: "turn-eks-tf.${DOMAIN}"
+  tls_port: 3478
+  udp_port: 3478
+
+loadBalancer:
+  type: alb
   tls:
     - hosts:
-        - $DOMAIN
-
-# Security context
-securityContext:
-  runAsNonRoot: true
-  runAsUser: 1000
-  fsGroup: 1000
-
-# Monitoring
-metrics:
-  enabled: true
-  serviceMonitor:
-    enabled: false
-
+        - "$DOMAIN"
+      certificateArn: arn:aws:acm:us-east-1:918595516608:certificate/388e3ff7-9763-4772-bfef-56cf64fcc414
 EOF
 
 echo "✅ LiveKit configuration created"

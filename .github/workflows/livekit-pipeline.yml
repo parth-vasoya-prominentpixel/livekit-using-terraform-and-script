@@ -298,49 +298,49 @@ jobs:
           AWS_REGION="${{ env.AWS_REGION }}" \
           ./02-setup-load-balancer.sh
 
-  # Step 5: Deploy LiveKit (COMMENTED OUT - FOCUS ON LOAD BALANCER FIRST)
-  # deploy-livekit:
-  #   name: 🎥 Step 5 - Deploy LiveKit
-  #   runs-on: ubuntu-latest
-  #   needs: [terraform-apply, setup-load-balancer]
-  #   if: ${{ inputs.action == 'deploy' }}
-  #   environment: livekit-poc-${{ inputs.environment }}-deploy-livekit
-  #   
-  #   steps:
-  #     - name: 📋 Manual Approval - Deploy LiveKit
-  #       run: |
-  #         echo "🤔 Manual approval required to deploy LiveKit"
-  #         echo "📋 This will deploy:"
-  #         echo "   - LiveKit application via Helm"
-  #         echo "   - Connected to Redis: ${{ needs.terraform-apply.outputs.redis-endpoint }}"
-  #         echo "🌍 Environment: ${{ inputs.environment }}"
-  #         echo "⏱️ Time: ~5-10 minutes"
-  #
-  #     - name: Checkout code
-  #       uses: actions/checkout@v4
-  #
-  #     - name: Configure AWS credentials
-  #       uses: aws-actions/configure-aws-credentials@v4
-  #       with:
-  #         role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-  #         role-session-name: GitHubActions-Deploy-LiveKit-${{ github.run_id }}
-  #         aws-region: ${{ env.AWS_REGION }}
-  #
-  #     - name: Setup Tools
-  #       run: |
-  #         curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl"
-  #         sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-  #         curl -fsSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz | tar -xz
-  #         sudo mv linux-amd64/helm /usr/local/bin/
-  #
-  #     - name: Run LiveKit Deployment Script
-  #       working-directory: scripts
-  #       run: |
-  #         chmod +x 03-deploy-livekit.sh
-  #         CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}" \
-  #         REDIS_ENDPOINT="${{ needs.terraform-apply.outputs.redis-endpoint }}" \
-  #         AWS_REGION="${{ env.AWS_REGION }}" \
-  #         ./03-deploy-livekit.sh
+  Step 5: Deploy LiveKit (COMMENTED OUT - FOCUS ON LOAD BALANCER FIRST)
+  deploy-livekit:
+    name: 🎥 Step 5 - Deploy LiveKit
+    runs-on: ubuntu-latest
+    needs: [terraform-apply, setup-load-balancer]
+    if: ${{ inputs.action == 'deploy' }}
+    environment: livekit-poc-${{ inputs.environment }}-deploy-livekit
+    
+    steps:
+      - name: 📋 Manual Approval - Deploy LiveKit
+        run: |
+          echo "🤔 Manual approval required to deploy LiveKit"
+          echo "📋 This will deploy:"
+          echo "   - LiveKit application via Helm"
+          echo "   - Connected to Redis: ${{ needs.terraform-apply.outputs.redis-endpoint }}"
+          echo "🌍 Environment: ${{ inputs.environment }}"
+          echo "⏱️ Time: ~5-10 minutes"
+  
+      - name: Checkout code
+        uses: actions/checkout@v4
+  
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          role-session-name: GitHubActions-Deploy-LiveKit-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+  
+      - name: Setup Tools
+        run: |
+          curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+          curl -fsSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz | tar -xz
+          sudo mv linux-amd64/helm /usr/local/bin/
+  
+      - name: Run LiveKit Deployment Script
+        working-directory: scripts
+        run: |
+          chmod +x 03-deploy-livekit.sh
+          CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}" \
+          REDIS_ENDPOINT="${{ needs.terraform-apply.outputs.redis-endpoint }}" \
+          AWS_REGION="${{ env.AWS_REGION }}" \
+          ./03-deploy-livekit.sh
 
   # DESTROY: Remove everything
   destroy:
