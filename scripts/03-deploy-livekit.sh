@@ -38,8 +38,8 @@ fi
 AWS_REGION=${AWS_REGION:-"us-east-1"}
 NAMESPACE="livekit"
 RELEASE_NAME="livekit"
-DOMAIN="livekit.digi-telephony.com"
-TURN_DOMAIN="turn.digi-telephony.com"
+DOMAIN="livekit-eks-tf.digi-telephony.com"
+TURN_DOMAIN="turn-eks-tf.digi-telephony.com"
 
 echo ""
 echo "📋 Configuration:"
