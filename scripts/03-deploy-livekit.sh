@@ -274,6 +274,54 @@ else
             echo "🔄 Found working Redis endpoint: $WORKING_ENDPOINT"
             REDIS_ENDPOINT="$WORKING_ENDPOINT:6379"
             REDIS_HOST="$WORKING_ENDPOINT"
+            echo "📋 Updated Redis endpoint: $REDIS_ENDPOINT"
+        fi
+    fi
+    
+    # Also check for Redis OSS clusters (single node)
+    echo "📋 Available ElastiCache Redis OSS clusters:"
+    REDIS_OSS_CLUSTERS=$(aws elasticache describe-cache-clusters --region "$AWS_REGION" --query 'CacheClusters[?Engine==`redis`].[CacheClusterId,CacheClusterStatus,RedisEndpoint.Address,RedisEndpoint.Port]' --output text 2>/dev/null)
+    
+    if [ -n "$REDIS_OSS_CLUSTERS" ]; then
+        echo "$REDIS_OSS_CLUSTERS"
+        
+        # Try to find the specific cluster: lp-ec-redis-use1-dev-redis
+        WORKING_ENDPOINT=$(aws elasticache describe-cache-clusters --region "$AWS_REGION" --cache-cluster-id "lp-ec-redis-use1-dev-redis" --query 'CacheClusters[0].RedisEndpoint.Address' --output text 2>/dev/null)
+        
+        if [ -n "$WORKING_ENDPOINT" ] && [ "$WORKING_ENDPOINT" != "None" ]; then
+            echo "🔄 Found Redis OSS cluster endpoint: $WORKING_ENDPOINT"
+            REDIS_ENDPOINT="$WORKING_ENDPOINT:6379"
+            REDIS_HOST="$WORKING_ENDPOINT"
+            echo "📋 Updated Redis endpoint: $REDIS_ENDPOINT"
+        else
+            # Try to find any available Redis OSS cluster
+            WORKING_ENDPOINT=$(aws elasticache describe-cache-clusters --region "$AWS_REGION" --query 'CacheClusters[?Engine==`redis` && CacheClusterStatus==`available`].RedisEndpoint.Address | [0]' --output text 2>/dev/null)
+            
+            if [ -n "$WORKING_ENDPOINT" ] && [ "$WORKING_ENDPOINT" != "None" ]; then
+                echo "🔄 Found alternative Redis OSS endpoint: $WORKING_ENDPOINT"
+                REDIS_ENDPOINT="$WORKING_ENDPOINT:6379"
+                REDIS_HOST="$WORKING_ENDPOINT"
+                echo "📋 Updated Redis endpoint: $REDIS_ENDPOINT"
+            fi
+        fi
+    fi
+    
+    # Final check - continue with deployment even if Redis endpoint not found
+    if [ "$REDIS_HOST" = "lp-redis-livekit-use1-dev.cache.amazonaws.com" ]; then
+        echo "⚠️ Could not find working Redis endpoint, continuing with provided endpoint"
+        echo "📋 LiveKit will show specific Redis connection error"
+    fi
+    
+    if [ -n "$REDIS_ENDPOINTS" ]; then
+        echo "$REDIS_ENDPOINTS"
+        
+        # Try to find a working Redis endpoint
+        WORKING_ENDPOINT=$(aws elasticache describe-replication-groups --region "$AWS_REGION" --query 'ReplicationGroups[?Status==`available`].PrimaryEndpoint.Address | [0]' --output text 2>/dev/null)
+        
+        if [ -n "$WORKING_ENDPOINT" ] && [ "$WORKING_ENDPOINT" != "None" ]; then
+            echo "🔄 Found working Redis endpoint: $WORKING_ENDPOINT"
+            REDIS_ENDPOINT="$WORKING_ENDPOINT:6379"
+            REDIS_HOST="$WORKING_ENDPOINT"
             echo "� Updatedo Redis endpoint: $REDIS_ENDPOINT"
         else
             echo "❌ No available Redis clusters found"
