@@ -4,8 +4,6 @@
 # Based on official LiveKit documentation
 # Reference: https://docs.livekit.io/deploy/kubernetes/
 
-set -e
-
 echo "🎥 LiveKit Setup"
 echo "================"
 echo "📋 LiveKit Server handles WebRTC media processing and room management"
@@ -97,9 +95,44 @@ fi
 # Step 1: Add Helm Repository
 echo ""
 echo "📦 Step 1: Add Helm Repository"
-helm repo add livekit https://livekit.github.io/charts >/dev/null 2>&1 || true
-helm repo update >/dev/null 2>&1
-echo "✅ LiveKit Helm repository added and updated"
+
+# Remove existing repo if it exists to avoid conflicts
+helm repo remove livekit >/dev/null 2>&1 || true
+
+# Add LiveKit repository
+echo "🔧 Adding LiveKit Helm repository..."
+if helm repo add livekit https://livekit.github.io/charts; then
+    echo "✅ LiveKit repository added"
+else
+    echo "❌ Failed to add LiveKit repository"
+    echo "🔄 Trying alternative repository URL..."
+    if helm repo add livekit https://helm.livekit.io; then
+        echo "✅ LiveKit repository added (alternative URL)"
+    else
+        echo "❌ Failed to add LiveKit repository with both URLs"
+        exit 1
+    fi
+fi
+
+# Update repositories
+echo "🔧 Updating Helm repositories..."
+if helm repo update; then
+    echo "✅ Helm repositories updated"
+else
+    echo "❌ Failed to update Helm repositories"
+    exit 1
+fi
+
+# Verify LiveKit chart is available
+echo "🔍 Verifying LiveKit chart availability..."
+if helm search repo livekit/livekit >/dev/null 2>&1; then
+    echo "✅ LiveKit chart found"
+else
+    echo "❌ LiveKit chart not found in repository"
+    echo "📋 Available charts:"
+    helm search repo livekit/ || true
+    exit 1
+fi
 
 # Step 2: Find SSL Certificate
 echo ""
