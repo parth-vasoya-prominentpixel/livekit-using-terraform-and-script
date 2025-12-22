@@ -1,4 +1,4 @@
-name: 🚀 LiveKit Auto Pipeline
+name: 🚀 LiveKit Pipeline (Auto)
 
 on:
   workflow_dispatch:
@@ -59,6 +59,7 @@ jobs:
     name: 🔧 Step 1 - Prerequisites
     runs-on: ubuntu-latest
     if: ${{ inputs.action == 'deploy' && !inputs.skip_prerequisites }}
+    environment: livekit-poc-${{ inputs.environment }}-prerequisites
     
     steps:
       - name: Checkout code
@@ -103,6 +104,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [prerequisites]
     if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_terraform_plan && (needs.prerequisites.result == 'success' || inputs.skip_prerequisites) }}
+    environment: livekit-poc-${{ inputs.environment }}-terraform-plan
     outputs:
       plan-output: ${{ steps.plan.outputs.plan_output }}
     
@@ -143,6 +145,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [terraform-plan]
     if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_terraform_apply && (needs.terraform-plan.result == 'success' || inputs.skip_terraform_plan) }}
+    environment: livekit-poc-${{ inputs.environment }}-terraform-apply
     outputs:
       cluster-name: ${{ steps.apply.outputs.cluster_name }}
       redis-endpoint: ${{ steps.apply.outputs.redis_endpoint }}
@@ -195,6 +198,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [terraform-apply]
     if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_load_balancer && (needs.terraform-apply.result == 'success' || inputs.skip_terraform_apply) }}
+    environment: livekit-poc-${{ inputs.environment }}-setup-load-balancer
     
     steps:
       - name: Checkout code
@@ -275,6 +279,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [terraform-apply, setup-load-balancer]
     if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_livekit && (needs.setup-load-balancer.result == 'success' || inputs.skip_load_balancer) }}
+    environment: livekit-poc-${{ inputs.environment }}-deploy-livekit
     
     steps:
       - name: Checkout code
@@ -321,6 +326,7 @@ jobs:
     name: 🗑️ Destroy LiveKit Infrastructure
     runs-on: ubuntu-latest
     if: ${{ inputs.action == 'destroy' }}
+    environment: livekit-poc-${{ inputs.environment }}-destroy
     
     steps:
       - name: Checkout code
