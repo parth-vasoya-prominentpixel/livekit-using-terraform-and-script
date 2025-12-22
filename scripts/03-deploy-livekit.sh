@@ -38,8 +38,8 @@ fi
 AWS_REGION=${AWS_REGION:-"us-east-1"}
 NAMESPACE="livekit"
 RELEASE_NAME="livekit"
-DOMAIN="livekit-eks.digi-telephony.com"
-TURN_DOMAIN="turn-eks.digi-telephony.com"
+DOMAIN="livekit.digi-telephony.com"
+TURN_DOMAIN="turn.digi-telephony.com"
 
 echo ""
 echo "📋 Configuration:"
@@ -125,14 +125,24 @@ fi
 
 # Verify LiveKit chart is available
 echo "🔍 Verifying LiveKit chart availability..."
-if helm search repo livekit/livekit >/dev/null 2>&1; then
+echo "📋 Searching for available LiveKit charts..."
+helm search repo livekit/
+
+# Check for livekit-server chart (correct chart name)
+if helm search repo livekit/livekit-server >/dev/null 2>&1; then
+    echo "✅ LiveKit server chart found"
+    CHART_NAME="livekit-server"
+elif helm search repo livekit/livekit >/dev/null 2>&1; then
     echo "✅ LiveKit chart found"
+    CHART_NAME="livekit"
 else
-    echo "❌ LiveKit chart not found in repository"
+    echo "❌ No LiveKit chart found in repository"
     echo "📋 Available charts:"
     helm search repo livekit/ || true
     exit 1
 fi
+
+echo "📋 Using chart: livekit/$CHART_NAME"
 
 # Step 2: Find SSL Certificate
 echo ""
@@ -217,28 +227,38 @@ cd "$(dirname "$0")/.."
 
 # Deploy LiveKit
 echo "🚀 Deploying LiveKit..."
+echo "📋 Chart: livekit/$CHART_NAME"
+echo "📋 Release: $RELEASE_NAME"
+echo "📋 Namespace: $NAMESPACE"
 
 # Check if release exists
 if helm status "$RELEASE_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
-    echo "🔄 Upgrading existing LiveKit release..."
+    echo "�  Upgrading existing LiveKit release..."
     HELM_ACTION="upgrade"
 else
     echo "🚀 Installing new LiveKit release..."
     HELM_ACTION="install"
 fi
 
-if helm "$HELM_ACTION" "$RELEASE_NAME" livekit/livekit \
+echo "📋 Running: helm $HELM_ACTION $RELEASE_NAME livekit/$CHART_NAME -n $NAMESPACE -f scripts/livekit-values.yaml"
+
+if helm "$HELM_ACTION" "$RELEASE_NAME" "livekit/$CHART_NAME" \
     -n "$NAMESPACE" \
     -f scripts/livekit-values.yaml \
-    --wait --timeout=10m; then
+    --wait --timeout=10m \
+    --debug; then
     
     echo "✅ LiveKit deployment completed successfully!"
 else
     echo "❌ LiveKit deployment failed"
     echo ""
-    echo "📋 Troubleshooting:"
+    echo "� Troublershooting:"
+    echo "📋 Helm status:"
     helm status "$RELEASE_NAME" -n "$NAMESPACE" 2>/dev/null || echo "   Release not found"
+    echo "📋 Pods:"
     kubectl get pods -n "$NAMESPACE" 2>/dev/null || echo "   No pods found"
+    echo "📋 Events:"
+    kubectl get events -n "$NAMESPACE" --sort-by='.lastTimestamp' | tail -10 || true
     
     # If upgrade failed, try fresh install
     if [ "$HELM_ACTION" = "upgrade" ]; then
@@ -246,10 +266,12 @@ else
         helm uninstall "$RELEASE_NAME" -n "$NAMESPACE" 2>/dev/null || true
         sleep 5
         
-        if helm install "$RELEASE_NAME" livekit/livekit \
+        echo "📋 Running: helm install $RELEASE_NAME livekit/$CHART_NAME -n $NAMESPACE -f scripts/livekit-values.yaml"
+        if helm install "$RELEASE_NAME" "livekit/$CHART_NAME" \
             -n "$NAMESPACE" \
             -f scripts/livekit-values.yaml \
-            --wait --timeout=10m; then
+            --wait --timeout=10m \
+            --debug; then
             
             echo "✅ Fresh install completed successfully!"
         else
