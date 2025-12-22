@@ -138,12 +138,8 @@ output "redis_cluster_arn" {
 }
 
 output "redis_cluster_endpoint" {
-  description = "Address of the replication group configuration endpoint"
-  value       = coalesce(
-    module.redis.replication_group_configuration_endpoint_address,
-    module.redis.replication_group_primary_endpoint_address,
-    ""
-  )
+  description = "Primary endpoint address of the Redis cluster"
+  value       = module.redis.replication_group_primary_endpoint_address != null ? "${module.redis.replication_group_primary_endpoint_address}:6379" : ""
 }
 
 output "redis_cluster_id" {
@@ -181,7 +177,7 @@ output "kubectl_config_command" {
 output "livekit_redis_config" {
   description = "Redis configuration for LiveKit values.yaml"
   value = {
-    address = "${coalesce(module.redis.replication_group_configuration_endpoint_address, module.redis.replication_group_primary_endpoint_address, "localhost")}:6379"
+    address = "${module.redis.replication_group_primary_endpoint_address}:6379"
   }
 }
 
