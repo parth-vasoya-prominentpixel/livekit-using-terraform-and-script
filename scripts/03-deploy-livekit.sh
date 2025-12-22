@@ -276,34 +276,84 @@ echo "   Namespace: $NAMESPACE"
 echo ""
 echo "⏳ Starting Helm $HELM_ACTION..."
 
-if helm "$HELM_ACTION" "$RELEASE_NAME" livekit/livekit \
-    -n "$NAMESPACE" \
-    -f livekit-values-deployment.yaml \
-    --version "$CHART_VERSION" \
-    --wait --timeout=10m; then
+# Attempt Helm deployment with better error handling
+HELM_SUCCESS=false
+MAX_HELM_ATTEMPTS=2
+
+for attempt in $(seq 1 $MAX_HELM_ATTEMPTS); do
+    echo "📋 Helm attempt $attempt/$MAX_HELM_ATTEMPTS..."
     
-    echo "✅ LiveKit $HELM_ACTION completed successfully!"
-else
-    echo "❌ LiveKit $HELM_ACTION failed"
+    if helm "$HELM_ACTION" "$RELEASE_NAME" livekit/livekit \
+        -n "$NAMESPACE" \
+        -f livekit-values-deployment.yaml \
+        --version "$CHART_VERSION" \
+        --wait --timeout=10m; then
+        
+        echo "✅ LiveKit $HELM_ACTION completed successfully!"
+        HELM_SUCCESS=true
+        break
+    else
+        echo "⚠️ Helm attempt $attempt failed"
+        
+        if [ $attempt -lt $MAX_HELM_ATTEMPTS ]; then
+            echo "🔄 Retrying in 30 seconds..."
+            sleep 30
+        fi
+    fi
+done
+
+if [ "$HELM_SUCCESS" = false ]; then
+    echo "❌ LiveKit $HELM_ACTION failed after $MAX_HELM_ATTEMPTS attempts"
     
     echo ""
-    echo "📋 Troubleshooting:"
+    echo "📋 Troubleshooting Information:"
+    echo "🔍 Helm release status:"
     helm status "$RELEASE_NAME" -n "$NAMESPACE" 2>/dev/null || echo "   Release not found"
+    
+    echo ""
+    echo "🔍 Pod status:"
     kubectl get pods -n "$NAMESPACE" 2>/dev/null || echo "   No pods found"
+    
+    echo ""
+    echo "🔍 Recent pod events:"
+    kubectl get events -n "$NAMESPACE" --sort-by='.lastTimestamp' | tail -10 2>/dev/null || echo "   No events found"
+    
+    echo ""
+    echo "💡 Common issues to check:"
+    echo "   - Redis connectivity (security groups)"
+    echo "   - Certificate ARN validity"
+    echo "   - Load Balancer Controller status"
+    echo "   - Resource limits and node capacity"
     
     exit 1
 fi
 
-# Wait for pods to be ready
+# Wait for pods to be ready with better handling
 echo ""
-echo "⏳ Waiting for LiveKit pods..."
-if kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=livekit -n "$NAMESPACE" --timeout=120s >/dev/null 2>&1; then
-    echo "✅ LiveKit pods are ready!"
+echo "⏳ Waiting for LiveKit pods to be ready..."
+
+# Check if pods exist first
+POD_COUNT=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --no-headers 2>/dev/null | wc -l || echo "0")
+
+if [ "$POD_COUNT" -eq 0 ]; then
+    echo "⚠️ No LiveKit pods found - checking deployment status..."
+    kubectl get deployment -n "$NAMESPACE" 2>/dev/null || echo "   No deployments found"
+    echo "💡 Pods may still be creating - continuing with deployment"
 else
-    echo "⚠️ Some pods may still be starting..."
+    echo "📋 Found $POD_COUNT LiveKit pod(s)"
+    
+    # Wait for pods with timeout
+    if kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=livekit -n "$NAMESPACE" --timeout=120s >/dev/null 2>&1; then
+        echo "✅ LiveKit pods are ready!"
+    else
+        echo "⚠️ Some pods may still be starting (timeout reached)"
+        echo "📋 Current pod status:"
+        kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit 2>/dev/null || echo "   No pods found"
+        echo "💡 Deployment will continue - pods may become ready shortly"
+    fi
 fi
 
-# Test Redis connectivity from LiveKit pods
+# Test Redis connectivity from LiveKit pods (non-blocking)
 echo ""
 echo "🔍 Testing Redis connectivity from LiveKit pods..."
 LIVEKIT_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
@@ -311,21 +361,62 @@ LIVEKIT_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit
 if [ -n "$LIVEKIT_POD" ]; then
     echo "📋 Testing from pod: $LIVEKIT_POD"
     
-    # Test Redis connection
-    if kubectl exec -n "$NAMESPACE" "$LIVEKIT_POD" -- timeout 5 nc -zv "${REDIS_ENDPOINT%:*}" "${REDIS_ENDPOINT##*:}" >/dev/null 2>&1; then
-        echo "✅ Redis connectivity test: SUCCESS"
+    # Test Redis connection (non-blocking - just informational)
+    echo "🔍 Attempting Redis connectivity test..."
+    
+    # Try multiple methods to test Redis connectivity
+    REDIS_TEST_RESULT="UNKNOWN"
+    
+    # Method 1: Try netcat if available
+    if kubectl exec -n "$NAMESPACE" "$LIVEKIT_POD" -- which nc >/dev/null 2>&1; then
+        if kubectl exec -n "$NAMESPACE" "$LIVEKIT_POD" -- timeout 5 nc -zv "${REDIS_ENDPOINT%:*}" "${REDIS_ENDPOINT##*:}" >/dev/null 2>&1; then
+            REDIS_TEST_RESULT="SUCCESS"
+        else
+            REDIS_TEST_RESULT="FAILED_NC"
+        fi
+    # Method 2: Try telnet if netcat not available
+    elif kubectl exec -n "$NAMESPACE" "$LIVEKIT_POD" -- which telnet >/dev/null 2>&1; then
+        if kubectl exec -n "$NAMESPACE" "$LIVEKIT_POD" -- timeout 5 telnet "${REDIS_ENDPOINT%:*}" "${REDIS_ENDPOINT##*:}" >/dev/null 2>&1; then
+            REDIS_TEST_RESULT="SUCCESS"
+        else
+            REDIS_TEST_RESULT="FAILED_TELNET"
+        fi
+    # Method 3: Try basic network test
     else
-        echo "⚠️ Redis connectivity test: FAILED"
-        echo "💡 Check security groups and network configuration"
-        
-        # Show Redis endpoint details
-        echo "📋 Redis endpoint: $REDIS_ENDPOINT"
-        echo "📋 Host: ${REDIS_ENDPOINT%:*}"
-        echo "📋 Port: ${REDIS_ENDPOINT##*:}"
+        echo "📋 Network tools not available in pod - skipping connectivity test"
+        REDIS_TEST_RESULT="SKIPPED"
     fi
+    
+    # Report results (non-blocking)
+    case "$REDIS_TEST_RESULT" in
+        "SUCCESS")
+            echo "✅ Redis connectivity test: SUCCESS"
+            ;;
+        "FAILED_NC"|"FAILED_TELNET")
+            echo "⚠️ Redis connectivity test: FAILED (but this is non-blocking)"
+            echo "💡 This may be normal - LiveKit will test Redis internally"
+            echo "📋 Redis endpoint: $REDIS_ENDPOINT"
+            echo "📋 Host: ${REDIS_ENDPOINT%:*}"
+            echo "📋 Port: ${REDIS_ENDPOINT##*:}"
+            echo "💡 Check LiveKit pod logs if Redis issues persist:"
+            echo "   kubectl logs -n $NAMESPACE $LIVEKIT_POD"
+            ;;
+        "SKIPPED")
+            echo "⚠️ Redis connectivity test: SKIPPED (no network tools available)"
+            echo "💡 LiveKit will test Redis connectivity internally"
+            ;;
+        *)
+            echo "⚠️ Redis connectivity test: UNKNOWN (but continuing deployment)"
+            ;;
+    esac
 else
     echo "⚠️ No LiveKit pods found for connectivity test"
+    echo "💡 This is normal if pods are still starting"
 fi
+
+echo ""
+echo "💡 Note: Redis connectivity test is informational only"
+echo "💡 LiveKit will establish Redis connection internally during startup"
 
 # Show deployment status
 echo ""
@@ -334,27 +425,45 @@ RUNNING_PODS=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=liveki
 TOTAL_PODS=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --no-headers 2>/dev/null | wc -l || echo "0")
 echo "   Pods: $RUNNING_PODS/$TOTAL_PODS running"
 
-# Check for ALB LoadBalancer endpoint
+# Check for ALB LoadBalancer endpoint with better handling
 echo ""
 echo "🌐 Checking ALB LoadBalancer endpoint..."
 
 ALB_ADDRESS=""
+ALB_FOUND=false
+
 for i in {1..4}; do
+    echo "📋 Attempt $i/4: Checking for ALB endpoint..."
+    
+    # Try to get the ALB address
     ALB_ADDRESS=$(kubectl get svc -n "$NAMESPACE" "$RELEASE_NAME" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
-    if [ -n "$ALB_ADDRESS" ]; then
+    
+    if [ -n "$ALB_ADDRESS" ] && [ "$ALB_ADDRESS" != "null" ]; then
+        ALB_FOUND=true
         break
     fi
+    
     if [ $i -lt 4 ]; then
-        echo "   Attempt $i/4: ALB provisioning..."
+        echo "   ALB still provisioning..."
         sleep 8
     fi
 done
 
-if [ -n "$ALB_ADDRESS" ]; then
+if [ "$ALB_FOUND" = true ]; then
     echo "✅ ALB Endpoint: https://$ALB_ADDRESS"
     echo "✅ LiveKit WebSocket: wss://$ALB_ADDRESS"
+    echo ""
+    echo "📋 DNS Configuration Required:"
+    echo "   Create CNAME record: $DOMAIN → $ALB_ADDRESS"
+    echo "   Create CNAME record: $TURN_DOMAIN → $ALB_ADDRESS"
 else
-    echo "⏳ ALB still provisioning (check later with: kubectl get svc -n $NAMESPACE)"
+    echo "⏳ ALB still provisioning (this is normal and may take 5-10 minutes)"
+    echo ""
+    echo "📋 Check ALB status later with:"
+    echo "   kubectl get svc -n $NAMESPACE $RELEASE_NAME"
+    echo "   kubectl describe svc -n $NAMESPACE $RELEASE_NAME"
+    echo ""
+    echo "💡 ALB provisioning continues in background"
 fi
 
 # Clean up temporary file
@@ -383,5 +492,63 @@ echo "   - Check ingress: kubectl get ingress -n $NAMESPACE"
 echo "   - View logs: kubectl logs -n $NAMESPACE -l app.kubernetes.io/name=livekit"
 echo "   - Test Redis: kubectl exec -n $NAMESPACE <pod-name> -- nc -zv ${REDIS_ENDPOINT%:*} ${REDIS_ENDPOINT##*:}"
 echo ""
+echo "📋 Troubleshooting Commands:"
+echo "   - Describe pods: kubectl describe pods -n $NAMESPACE"
+echo "   - Check events: kubectl get events -n $NAMESPACE --sort-by='.lastTimestamp'"
+echo "   - Helm status: helm status $RELEASE_NAME -n $NAMESPACE"
+echo ""
 echo "💡 Uses official LiveKit Helm repository: https://livekit.github.io/charts"
 echo "💡 Uses correct chart: livekit/livekit (not livekit-server)"
+
+# Final validation
+echo ""
+echo "🔍 Final Deployment Validation:"
+echo "================================"
+
+# Check namespace
+if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
+    echo "✅ Namespace: $NAMESPACE exists"
+else
+    echo "❌ Namespace: $NAMESPACE missing"
+fi
+
+# Check Helm release
+if helm status "$RELEASE_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
+    HELM_STATUS=$(helm status "$RELEASE_NAME" -n "$NAMESPACE" -o json 2>/dev/null | grep -o '"status":"[^"]*"' | cut -d'"' -f4 || echo "unknown")
+    if [ "$HELM_STATUS" = "deployed" ]; then
+        echo "✅ Helm Release: $RELEASE_NAME is deployed"
+    else
+        echo "⚠️ Helm Release: $RELEASE_NAME status is $HELM_STATUS"
+    fi
+else
+    echo "❌ Helm Release: $RELEASE_NAME not found"
+fi
+
+# Check pods
+RUNNING_PODS=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+TOTAL_PODS=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --no-headers 2>/dev/null | wc -l || echo "0")
+
+if [ "$TOTAL_PODS" -gt 0 ]; then
+    if [ "$RUNNING_PODS" -eq "$TOTAL_PODS" ]; then
+        echo "✅ Pods: All $TOTAL_PODS pods are running"
+    else
+        echo "⚠️ Pods: $RUNNING_PODS/$TOTAL_PODS running"
+    fi
+else
+    echo "❌ Pods: No LiveKit pods found"
+fi
+
+# Check service
+if kubectl get svc -n "$NAMESPACE" "$RELEASE_NAME" >/dev/null 2>&1; then
+    echo "✅ Service: $RELEASE_NAME exists"
+else
+    echo "❌ Service: $RELEASE_NAME missing"
+fi
+
+echo ""
+if [ "$RUNNING_PODS" -gt 0 ] && helm status "$RELEASE_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
+    echo "🎉 LiveKit deployment appears successful!"
+    echo "💡 Monitor the ALB provisioning and update DNS records"
+else
+    echo "⚠️ LiveKit deployment may have issues - check the troubleshooting commands above"
+fi
