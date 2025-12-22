@@ -138,6 +138,11 @@ echo "📦 Setting up LiveKit Helm repository..."
 helm repo add livekit https://helm.livekit.io/ >/dev/null 2>&1 || true
 helm repo update >/dev/null 2>&1
 
+# Check available chart versions
+echo "🔍 Checking available LiveKit chart versions..."
+AVAILABLE_VERSIONS=$(helm search repo livekit/livekit-server --versions --output json 2>/dev/null | jq -r '.[].version' | head -5 | tr '\n' ' ' || echo "Unable to fetch versions")
+echo "📋 Recent versions: $AVAILABLE_VERSIONS"
+
 # Get cluster information for LoadBalancer configuration
 echo ""
 echo "� Getnting cluster information..."
@@ -246,7 +251,9 @@ echo "   Redis: $REDIS_ENDPOINT"
 echo "   Load Balancer: ALB only (for WebSocket traffic)"
 
 # Deploy or upgrade LiveKit
-CHART_VERSION="1.5.2"
+# Try to get the latest chart version, fallback to known working version
+CHART_VERSION=$(helm search repo livekit/livekit-server --output json 2>/dev/null | jq -r '.[0].version' 2>/dev/null || echo "1.7.2")
+echo "📋 Using chart version: $CHART_VERSION"
 
 if [ "$UPGRADE_EXISTING" = true ]; then
     echo ""
@@ -267,7 +274,8 @@ echo "   Namespace: $NAMESPACE"
 echo ""
 echo "⏳ Starting Helm $HELM_ACTION..."
 
-if helm "$HELM_ACTION" "$RELEASE_NAME" livekit/livekit \
+# First try with detected version
+if helm "$HELM_ACTION" "$RELEASE_NAME" livekit/livekit-server \
     -n "$NAMESPACE" \
     -f livekit-values-deployment.yaml \
     --version "$CHART_VERSION" \
@@ -275,14 +283,26 @@ if helm "$HELM_ACTION" "$RELEASE_NAME" livekit/livekit \
     
     echo "✅ LiveKit $HELM_ACTION completed successfully!"
 else
-    echo "❌ LiveKit $HELM_ACTION failed"
+    echo "❌ LiveKit $HELM_ACTION failed with version $CHART_VERSION"
     
-    echo ""
-    echo "📋 Troubleshooting:"
-    helm status "$RELEASE_NAME" -n "$NAMESPACE" 2>/dev/null || echo "   Release not found"
-    kubectl get pods -n "$NAMESPACE" 2>/dev/null || echo "   No pods found"
-    
-    exit 1
+    # Try without version specification (uses latest)
+    echo "🔄 Retrying without version specification..."
+    if helm "$HELM_ACTION" "$RELEASE_NAME" livekit/livekit-server \
+        -n "$NAMESPACE" \
+        -f livekit-values-deployment.yaml \
+        --wait --timeout=10m; then
+        
+        echo "✅ LiveKit $HELM_ACTION completed successfully!"
+    else
+        echo "❌ LiveKit $HELM_ACTION failed"
+        
+        echo ""
+        echo "📋 Troubleshooting:"
+        helm status "$RELEASE_NAME" -n "$NAMESPACE" 2>/dev/null || echo "   Release not found"
+        kubectl get pods -n "$NAMESPACE" 2>/dev/null || echo "   No pods found"
+        
+        exit 1
+    fi
 fi
 
 # Wait for pods to be ready
