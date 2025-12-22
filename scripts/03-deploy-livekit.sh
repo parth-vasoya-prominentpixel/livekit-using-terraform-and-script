@@ -1,15 +1,15 @@
 #!/bin/bash
 
-# LiveKit Deployment Script
-# Uses existing livekit-values.yaml configuration
+# LiveKit Deployment Script - Simplified
+# Based on official LiveKit documentation
 # Reference: https://docs.livekit.io/deploy/kubernetes/
 
 set -e
 
-echo "🎥 LiveKit Deployment"
-echo "===================="
-echo "📋 Uses your existing livekit-values.yaml configuration"
-echo "� Fhttps://docs.livekit.io/deploy/kubernetes/"
+echo "🎥 LiveKit Setup"
+echo "================"
+echo "📋 LiveKit Server handles WebRTC media processing and room management"
+echo "📋 Using ALB Ingress Controller for signal connection"
 
 # Check required environment variables
 if [ -z "$CLUSTER_NAME" ]; then
@@ -18,7 +18,7 @@ if [ -z "$CLUSTER_NAME" ]; then
     echo "Usage:"
     echo "  export CLUSTER_NAME=your-cluster-name"
     echo "  export REDIS_ENDPOINT=your-redis-endpoint"
-    echo "  export AWS_REGION=us-east-1  # optional"
+    echo "  export AWS_REGION=us-east-1"
     echo "  ./03-deploy-livekit.sh"
     echo ""
     exit 1
@@ -30,17 +30,18 @@ if [ -z "$REDIS_ENDPOINT" ]; then
     echo "Usage:"
     echo "  export CLUSTER_NAME=your-cluster-name"
     echo "  export REDIS_ENDPOINT=your-redis-endpoint"
-    echo "  export AWS_REGION=us-east-1  # optional"
+    echo "  export AWS_REGION=us-east-1"
     echo "  ./03-deploy-livekit.sh"
     echo ""
     exit 1
 fi
 
-# Set configuration
+# Set defaults
+AWS_REGION=${AWS_REGION:-"us-east-1"}
 NAMESPACE="livekit"
 RELEASE_NAME="livekit"
-DOMAIN="livekit-eks-tf.digi-telephony.com"
-TURN_DOMAIN="turn-eks-tf.digi-telephony.com"
+DOMAIN="livekit-eks.digi-telephony.com"
+TURN_DOMAIN="turn-eks.digi-telephony.com"
 
 echo ""
 echo "📋 Configuration:"
@@ -50,7 +51,6 @@ echo "   Redis: $REDIS_ENDPOINT"
 echo "   Namespace: $NAMESPACE"
 echo "   Release: $RELEASE_NAME"
 echo "   Domain: $DOMAIN"
-echo "   TURN Domain: $TURN_DOMAIN"
 
 # Quick verification
 echo ""
@@ -62,137 +62,89 @@ if ! aws sts get-caller-identity >/dev/null 2>&1; then
     exit 1
 fi
 
-# Check cluster exists
-if ! aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
-    echo "❌ Cluster not found or not accessible"
+# Update kubeconfig
+echo "🔧 Updating kubeconfig..."
+aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME" >/dev/null 2>&1
+
+# Test kubectl
+if ! timeout 10 kubectl get nodes >/dev/null 2>&1; then
+    echo "❌ Cannot connect to cluster"
     exit 1
 fi
 
 echo "✅ AWS and cluster verified"
 
-# Update kubeconfig
-echo ""
-echo "🔧 Updating kubeconfig..."
-aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME" >/dev/null 2>&1
-echo "✅ Kubeconfig updated"
-
-# Test kubectl
-echo ""
-echo "🔍 Testing kubectl..."
-if ! timeout 10 kubectl get nodes >/dev/null 2>&1; then
-    echo "❌ Cannot connect to cluster"
-    exit 1
-fi
-echo "✅ kubectl working"
-
 # Verify Load Balancer Controller
 echo ""
 echo "🔍 Verifying AWS Load Balancer Controller..."
-LB_CONTROLLERS=$(kubectl get deployment -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | wc -l)
-
-if [ "$LB_CONTROLLERS" -eq 0 ]; then
-    echo "❌ No AWS Load Balancer Controller found"
-    echo "💡 Please run: ./scripts/02-setup-load-balancer.sh"
+if ! kubectl get deployment -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | grep -q "2/2"; then
+    echo "❌ AWS Load Balancer Controller not ready"
+    echo "💡 Please run: ./02-setup-load-balancer.sh"
     exit 1
 fi
-
-# Check if any controller is healthy
-HEALTHY_FOUND=false
-kubectl get deployment -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | while read name ready rest; do
-    if [[ "$ready" == *"/"* ]]; then
-        READY_COUNT=$(echo "$ready" | cut -d'/' -f1)
-        DESIRED_COUNT=$(echo "$ready" | cut -d'/' -f2)
-        if [ "$READY_COUNT" = "$DESIRED_COUNT" ] && [ "$READY_COUNT" != "0" ]; then
-            echo "✅ Found healthy controller: $name ($ready)"
-            HEALTHY_FOUND=true
-            break
-        fi
-    fi
-done
-
 echo "✅ Load Balancer Controller is ready"
 
-# Create or use existing namespace
+# Create namespace if needed
 echo ""
 echo "📦 Setting up namespace..."
-if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
-    echo "✅ Namespace '$NAMESPACE' exists"
-    
-    # Check for existing deployment
-    if kubectl get deployment -n "$NAMESPACE" -l app.kubernetes.io/name=livekit >/dev/null 2>&1; then
-        echo "✅ Existing LiveKit deployment found"
-        UPGRADE_EXISTING=true
-    else
-        echo "✅ Namespace ready for new deployment"
-        UPGRADE_EXISTING=false
-    fi
-else
+if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
     echo "📦 Creating namespace: $NAMESPACE"
     kubectl create namespace "$NAMESPACE"
-    UPGRADE_EXISTING=false
+else
+    echo "✅ Namespace '$NAMESPACE' exists"
 fi
 
-# Setup Helm repository
+# Step 1: Add Helm Repository
 echo ""
-echo "📦 Setting up LiveKit Helm repository..."
-helm repo add livekit https://helm.livekit.io/ >/dev/null 2>&1 || true
+echo "📦 Step 1: Add Helm Repository"
+helm repo add livekit https://livekit.github.io/charts >/dev/null 2>&1 || true
 helm repo update >/dev/null 2>&1
+echo "✅ LiveKit Helm repository added and updated"
 
-# Check available chart versions
-echo "🔍 Checking available LiveKit chart versions..."
-AVAILABLE_VERSIONS=$(helm search repo livekit/livekit-server --versions --output json 2>/dev/null | jq -r '.[].version' | head -5 | tr '\n' ' ' || echo "Unable to fetch versions")
-echo "📋 Recent versions: $AVAILABLE_VERSIONS"
-
-# Get cluster information for LoadBalancer configuration
+# Step 2: Find SSL Certificate
 echo ""
-echo "� Getnting cluster information..."
-VPC_ID=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query 'cluster.resourcesVpcConfig.vpcId' --output text)
-SUBNET_IDS=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query 'cluster.resourcesVpcConfig.subnetIds' --output text | tr '\t' ',')
-
-echo "✅ VPC ID: $VPC_ID"
-echo "✅ Subnets: $SUBNET_IDS"
-
-# Setup Helm repository
-echo ""
-echo "📦 Setting up LiveKit Helm repository..."
-helm repo add livekit https://helm.livekit.io/ >/dev/null 2>&1 || true
-helm repo update >/dev/null 2>&1
-
-# Create LiveKit configuration dynamically
-echo ""
-echo "🔧 Creating LiveKit configuration..."
-cd "$(dirname "$0")/.."
-
-# Generate API credentials
-API_KEY=${LIVEKIT_API_KEY:-"devkey"}
-API_SECRET=${LIVEKIT_API_SECRET:-"devsecret"}
-
-# Check if certificate exists for the domain, if not use wildcard
-echo "🔍 Checking SSL certificate..."
+echo "🔍 Step 2: Finding SSL Certificate"
 CERT_ARN=""
 
-# Try to find certificate for the specific domain
+# Try to find certificate for the specific domain first
+echo "🔍 Checking for domain-specific certificate: $DOMAIN"
 CERT_ARN=$(aws acm list-certificates --region "$AWS_REGION" --query "CertificateSummaryList[?DomainName=='$DOMAIN'].CertificateArn" --output text 2>/dev/null || echo "")
 
-# If not found, try wildcard certificate
-if [ -z "$CERT_ARN" ]; then
-    CERT_ARN=$(aws acm list-certificates --region "$AWS_REGION" --query "CertificateSummaryList[?DomainName=='*.digi-telephony.com'].CertificateArn" --output text 2>/dev/null || echo "")
-fi
-
-# If still not found, use the existing one you provided
-if [ -z "$CERT_ARN" ]; then
-    CERT_ARN="arn:aws:acm:us-east-1:918595516608:certificate/388e3ff7-9763-4772-bfef-56cf64fcc414"
-    echo "⚠️ Using existing certificate ARN (may not match domain)"
+if [ -n "$CERT_ARN" ] && [ "$CERT_ARN" != "None" ]; then
+    echo "✅ Found domain-specific certificate: $(basename "$CERT_ARN")"
 else
-    echo "✅ Found certificate: $(basename "$CERT_ARN")"
+    # Try wildcard certificate
+    echo "🔍 Checking for wildcard certificate: *.digi-telephony.com"
+    CERT_ARN=$(aws acm list-certificates --region "$AWS_REGION" --query "CertificateSummaryList[?DomainName=='*.digi-telephony.com'].CertificateArn" --output text 2>/dev/null || echo "")
+    
+    if [ -n "$CERT_ARN" ] && [ "$CERT_ARN" != "None" ]; then
+        echo "✅ Found wildcard certificate: $(basename "$CERT_ARN")"
+    else
+        # Final fallback to any certificate containing digi-telephony.com
+        echo "🔍 Checking for any digi-telephony.com certificate..."
+        CERT_ARN=$(aws acm list-certificates --region "$AWS_REGION" --query "CertificateSummaryList[?contains(DomainName, 'digi-telephony.com')].CertificateArn | [0]" --output text 2>/dev/null || echo "")
+        
+        if [ -n "$CERT_ARN" ] && [ "$CERT_ARN" != "None" ]; then
+            echo "✅ Found fallback certificate: $(basename "$CERT_ARN")"
+        else
+            echo "❌ No SSL certificate found for digi-telephony.com domain"
+            echo "💡 Please create an SSL certificate in ACM for *.digi-telephony.com"
+            exit 1
+        fi
+    fi
 fi
 
-echo "📋 Certificate ARN: $CERT_ARN"
+echo "📋 Using Certificate ARN: $CERT_ARN"
 
-cat > "livekit-values-deployment.yaml" << EOF
-# LiveKit Configuration for EKS Deployment - ALB Only
-# Domain: $DOMAIN
-# Generated dynamically by deployment script
+# Step 3: Deploy LiveKit with Custom Values
+echo ""
+echo "🚀 Step 3: Deploy LiveKit with Custom Values"
+
+# Create minimal LiveKit values file
+echo "🔧 Creating LiveKit values file..."
+cat > "livekit-values.yaml" << EOF
+# Minimal LiveKit Configuration
+# Generated by deployment script
 
 livekit:
   domain: "$DOMAIN"
@@ -204,28 +156,13 @@ livekit:
     address: "$REDIS_ENDPOINT"
   keys:
     APIKmrHi78hxpbd: Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB
-  metrics:
-    enabled: true
-    prometheus:
-      enabled: true
-      port: 6789
   resources:
     requests:
       cpu: 500m
       memory: 512Mi
     limits:
-      cpu: 2000m
-      memory: 2Gi
-  affinity:
-    podAntiAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        - labelSelector:
-            matchExpressions:
-              - key: app
-                operator: In
-                values:
-                  - livekit-livekit-server
-          topologyKey: "kubernetes.io/hostname"
+      cpu: 1000m
+      memory: 1Gi
 
 turn:
   enabled: true
@@ -239,136 +176,94 @@ loadBalancer:
     - hosts:
         - "$DOMAIN"
       certificateArn: "$CERT_ARN"
-
 EOF
 
-echo "✅ LiveKit configuration created (ALB only - matching your setup)"
-echo "📋 Configuration details:"
-echo "   Domain: $DOMAIN"
-echo "   TURN Domain: $TURN_DOMAIN"
-echo "   Certificate: $(basename "$CERT_ARN")"
-echo "   Redis: $REDIS_ENDPOINT"
-echo "   Load Balancer: ALB only (for WebSocket traffic)"
+echo "✅ LiveKit values file created"
 
-# Deploy or upgrade LiveKit
-# Try to get the latest chart version, fallback to known working version
-CHART_VERSION=$(helm search repo livekit/livekit-server --output json 2>/dev/null | jq -r '.[0].version' 2>/dev/null || echo "1.7.2")
-echo "📋 Using chart version: $CHART_VERSION"
+cd "$(dirname "$0")/.."
 
-if [ "$UPGRADE_EXISTING" = true ]; then
-    echo ""
-    echo "🔄 Upgrading existing LiveKit deployment..."
+# Deploy LiveKit
+echo "🚀 Deploying LiveKit..."
+
+# Check if release exists
+if helm status "$RELEASE_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
+    echo "🔄 Upgrading existing LiveKit release..."
     HELM_ACTION="upgrade"
 else
-    echo ""
-    echo "🚀 Installing new LiveKit deployment..."
+    echo "🚀 Installing new LiveKit release..."
     HELM_ACTION="install"
 fi
 
-echo "📋 Deployment details:"
-echo "   Action: $HELM_ACTION"
-echo "   Release: $RELEASE_NAME"
-echo "   Chart Version: $CHART_VERSION"
-echo "   Namespace: $NAMESPACE"
-
-echo ""
-echo "⏳ Starting Helm $HELM_ACTION..."
-
-# First try with detected version
-if helm "$HELM_ACTION" "$RELEASE_NAME" livekit/livekit-server \
+if helm "$HELM_ACTION" "$RELEASE_NAME" livekit/livekit \
     -n "$NAMESPACE" \
-    -f livekit-values-deployment.yaml \
-    --version "$CHART_VERSION" \
+    -f scripts/livekit-values.yaml \
     --wait --timeout=10m; then
     
-    echo "✅ LiveKit $HELM_ACTION completed successfully!"
+    echo "✅ LiveKit deployment completed successfully!"
 else
-    echo "❌ LiveKit $HELM_ACTION failed with version $CHART_VERSION"
+    echo "❌ LiveKit deployment failed"
+    echo ""
+    echo "📋 Troubleshooting:"
+    helm status "$RELEASE_NAME" -n "$NAMESPACE" 2>/dev/null || echo "   Release not found"
+    kubectl get pods -n "$NAMESPACE" 2>/dev/null || echo "   No pods found"
     
-    # Try without version specification (uses latest)
-    echo "🔄 Retrying without version specification..."
-    if helm "$HELM_ACTION" "$RELEASE_NAME" livekit/livekit-server \
-        -n "$NAMESPACE" \
-        -f livekit-values-deployment.yaml \
-        --wait --timeout=10m; then
+    # If upgrade failed, try fresh install
+    if [ "$HELM_ACTION" = "upgrade" ]; then
+        echo "🔄 Upgrade failed, trying fresh install..."
+        helm uninstall "$RELEASE_NAME" -n "$NAMESPACE" 2>/dev/null || true
+        sleep 5
         
-        echo "✅ LiveKit $HELM_ACTION completed successfully!"
+        if helm install "$RELEASE_NAME" livekit/livekit \
+            -n "$NAMESPACE" \
+            -f scripts/livekit-values.yaml \
+            --wait --timeout=10m; then
+            
+            echo "✅ Fresh install completed successfully!"
+        else
+            echo "❌ Fresh install also failed"
+            exit 1
+        fi
     else
-        echo "❌ LiveKit $HELM_ACTION failed"
-        
-        echo ""
-        echo "📋 Troubleshooting:"
-        helm status "$RELEASE_NAME" -n "$NAMESPACE" 2>/dev/null || echo "   Release not found"
-        kubectl get pods -n "$NAMESPACE" 2>/dev/null || echo "   No pods found"
-        
         exit 1
     fi
 fi
 
-# Wait for pods to be ready
+# Step 4: Verify Deployment
 echo ""
-echo "⏳ Waiting for LiveKit pods..."
-if kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=livekit -n "$NAMESPACE" --timeout=180s >/dev/null 2>&1; then
+echo "🔍 Step 4: Verify Deployment"
+
+echo "⏳ Waiting for LiveKit pods to be ready..."
+if kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=livekit -n "$NAMESPACE" --timeout=180s; then
     echo "✅ LiveKit pods are ready!"
 else
     echo "⚠️ Some pods may still be starting..."
 fi
 
-# Show deployment status
 echo ""
-echo "📊 Deployment Status:"
-RUNNING_PODS=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --no-headers 2>/dev/null | grep -c "Running" || echo "0")
-TOTAL_PODS=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --no-headers 2>/dev/null | wc -l || echo "0")
-echo "   Pods: $RUNNING_PODS/$TOTAL_PODS running"
-
-# Check for ALB LoadBalancer endpoint
-echo ""
-echo "🌐 Checking ALB LoadBalancer endpoint..."
-
-# Check ALB 
-echo "📋 ALB LoadBalancer:"
-ALB_ADDRESS=""
-for i in {1..6}; do
-    # LiveKit with ALB creates a LoadBalancer service, not Ingress
-    ALB_ADDRESS=$(kubectl get svc -n "$NAMESPACE" "$RELEASE_NAME" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
-    if [ -n "$ALB_ADDRESS" ]; then
-        break
-    fi
-    if [ $i -lt 6 ]; then
-        echo "   Attempt $i/6: ALB provisioning..."
-        sleep 10
-    fi
-done
-
-if [ -n "$ALB_ADDRESS" ]; then
-    echo "✅ ALB Endpoint: https://$ALB_ADDRESS"
-    echo "✅ LiveKit WebSocket: wss://$ALB_ADDRESS"
-else
-    echo "⏳ ALB still provisioning (check later with: kubectl get svc -n $NAMESPACE)"
-fi
-
-# Clean up temporary file
-rm -f livekit-values-deployment.yaml
+echo "📊 Pod Status:"
+kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit
 
 echo ""
-echo "🎉 LiveKit Deployment Completed!"
-echo "==============================="
+echo "📊 Service Status:"
+kubectl get svc -n "$NAMESPACE"
+
+echo ""
+echo "🎉 LiveKit Setup Completed!"
+echo "=========================="
 echo ""
 echo "📋 Summary:"
 echo "   ✅ Namespace: $NAMESPACE"
 echo "   ✅ Release: $RELEASE_NAME"
-echo "   ✅ Chart Version: $CHART_VERSION"
 echo "   ✅ Domain: $DOMAIN"
 echo "   ✅ Redis: $REDIS_ENDPOINT"
+echo "   ✅ Certificate: $(basename "$CERT_ARN")"
 echo ""
-echo "📋 Next Steps:"
-echo "   1. Wait for LoadBalancers to get endpoints (5-10 minutes)"
-echo "   2. Update DNS to point $DOMAIN to ALB endpoint"
-echo "   3. Test LiveKit connection"
+echo "📋 Expected Output: Pods should show READY status"
 echo ""
 echo "📋 Monitoring Commands:"
-echo "   - Check pods: kubectl get pods -n $NAMESPACE"
+echo "   - Check pods: kubectl get pods -n $NAMESPACE -l app.kubernetes.io/name=livekit"
 echo "   - Check services: kubectl get svc -n $NAMESPACE"
 echo "   - View logs: kubectl logs -n $NAMESPACE -l app.kubernetes.io/name=livekit"
-echo ""
-echo "💡 Uses your existing livekit-values.yaml configuration!"
+
+# Clean up temporary file
+rm -f scripts/livekit-values.yaml
