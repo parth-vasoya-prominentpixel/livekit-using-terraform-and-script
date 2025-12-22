@@ -118,14 +118,14 @@ else
     UPGRADE_EXISTING=false
 fi
 
-# Setup Helm repository
+# Setup Helm repository - Official LiveKit Charts
 echo ""
 echo "📦 Setting up LiveKit Helm repository..."
 helm repo remove livekit >/dev/null 2>&1 || true
-helm repo add livekit https://helm.livekit.io
+helm repo add livekit https://livekit.github.io/charts
 helm repo update
 
-echo "✅ Helm repository ready"
+echo "✅ Official LiveKit Helm repository ready"
 
 # Get cluster information
 echo ""
@@ -136,28 +136,63 @@ SUBNET_IDS=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGI
 echo "✅ VPC ID: $VPC_ID"
 echo "✅ Subnets: $SUBNET_IDS"
 
-# Check certificate
+# Check certificate - Enhanced detection with fallback
 echo ""
 echo "🔍 Checking SSL certificate..."
 CERT_ARN=""
 
-# Try to find certificate for the specific domain
-CERT_ARN=$(aws acm list-certificates --region "$AWS_REGION" --query "CertificateSummaryList[?DomainName=='$DOMAIN'].CertificateArn" --output text 2>/dev/null || echo "")
+# Step 1: Try to find certificate for the specific domain
+echo "🔍 Looking for certificate for domain: $DOMAIN"
+CERT_ARN=$(aws acm list-certificates --region "$AWS_REGION" --query "CertificateSummaryList[?DomainName=='$DOMAIN'].CertificateArn" --output text 2>/dev/null | head -1 || echo "")
 
-# If not found, try wildcard certificate
-if [ -z "$CERT_ARN" ]; then
-    CERT_ARN=$(aws acm list-certificates --region "$AWS_REGION" --query "CertificateSummaryList[?DomainName=='*.digi-telephony.com'].CertificateArn" --output text 2>/dev/null || echo "")
+# Step 2: If not found, try wildcard certificate for digi-telephony.com
+if [ -z "$CERT_ARN" ] || [ "$CERT_ARN" = "None" ]; then
+    echo "🔍 Looking for wildcard certificate: *.digi-telephony.com"
+    CERT_ARN=$(aws acm list-certificates --region "$AWS_REGION" --query "CertificateSummaryList[?DomainName=='*.digi-telephony.com'].CertificateArn" --output text 2>/dev/null | head -1 || echo "")
 fi
 
-# If still not found, use the existing one
-if [ -z "$CERT_ARN" ]; then
+# Step 3: If still not found, search by subject alternative names
+if [ -z "$CERT_ARN" ] || [ "$CERT_ARN" = "None" ]; then
+    echo "🔍 Searching certificates by subject alternative names..."
+    # Get all certificates and check their details
+    ALL_CERTS=$(aws acm list-certificates --region "$AWS_REGION" --query "CertificateSummaryList[].CertificateArn" --output text 2>/dev/null || echo "")
+    
+    for cert in $ALL_CERTS; do
+        if [ -n "$cert" ] && [ "$cert" != "None" ]; then
+            # Check if this certificate covers our domain
+            CERT_DOMAINS=$(aws acm describe-certificate --certificate-arn "$cert" --region "$AWS_REGION" --query "Certificate.SubjectAlternativeNames[]" --output text 2>/dev/null || echo "")
+            
+            # Check if our domain matches any of the certificate domains
+            for cert_domain in $CERT_DOMAINS; do
+                if [ "$cert_domain" = "$DOMAIN" ] || [ "$cert_domain" = "*.digi-telephony.com" ]; then
+                    CERT_ARN="$cert"
+                    echo "✅ Found matching certificate via SAN: $cert_domain"
+                    break 2
+                fi
+            done
+        fi
+    done
+fi
+
+# Step 4: If still not found, use the existing fallback certificate
+if [ -z "$CERT_ARN" ] || [ "$CERT_ARN" = "None" ]; then
     CERT_ARN="arn:aws:acm:us-east-1:918595516608:certificate/388e3ff7-9763-4772-bfef-56cf64fcc414"
-    echo "⚠️ Using existing certificate ARN"
+    echo "⚠️ No matching certificate found - using existing fallback certificate"
+    echo "💡 Make sure this certificate covers domain: $DOMAIN"
 else
     echo "✅ Found certificate: $(basename "$CERT_ARN")"
 fi
 
 echo "📋 Certificate ARN: $CERT_ARN"
+
+# Verify certificate status
+echo "🔍 Verifying certificate status..."
+CERT_STATUS=$(aws acm describe-certificate --certificate-arn "$CERT_ARN" --region "$AWS_REGION" --query "Certificate.Status" --output text 2>/dev/null || echo "UNKNOWN")
+if [ "$CERT_STATUS" = "ISSUED" ]; then
+    echo "✅ Certificate status: $CERT_STATUS"
+else
+    echo "⚠️ Certificate status: $CERT_STATUS (may cause issues)"
+fi
 
 # Create LiveKit configuration
 echo ""
@@ -234,14 +269,14 @@ fi
 echo "📋 Deployment details:"
 echo "   Action: $HELM_ACTION"
 echo "   Release: $RELEASE_NAME"
-echo "   Chart: livekit/livekit-server"
+echo "   Chart: livekit/livekit"
 echo "   Chart Version: $CHART_VERSION"
 echo "   Namespace: $NAMESPACE"
 
 echo ""
 echo "⏳ Starting Helm $HELM_ACTION..."
 
-if helm "$HELM_ACTION" "$RELEASE_NAME" livekit/livekit-server \
+if helm "$HELM_ACTION" "$RELEASE_NAME" livekit/livekit \
     -n "$NAMESPACE" \
     -f livekit-values-deployment.yaml \
     --version "$CHART_VERSION" \
@@ -262,10 +297,34 @@ fi
 # Wait for pods to be ready
 echo ""
 echo "⏳ Waiting for LiveKit pods..."
-if kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=livekit -n "$NAMESPACE" --timeout=180s >/dev/null 2>&1; then
+if kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=livekit -n "$NAMESPACE" --timeout=120s >/dev/null 2>&1; then
     echo "✅ LiveKit pods are ready!"
 else
     echo "⚠️ Some pods may still be starting..."
+fi
+
+# Test Redis connectivity from LiveKit pods
+echo ""
+echo "🔍 Testing Redis connectivity from LiveKit pods..."
+LIVEKIT_POD=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+
+if [ -n "$LIVEKIT_POD" ]; then
+    echo "📋 Testing from pod: $LIVEKIT_POD"
+    
+    # Test Redis connection
+    if kubectl exec -n "$NAMESPACE" "$LIVEKIT_POD" -- timeout 5 nc -zv "${REDIS_ENDPOINT%:*}" "${REDIS_ENDPOINT##*:}" >/dev/null 2>&1; then
+        echo "✅ Redis connectivity test: SUCCESS"
+    else
+        echo "⚠️ Redis connectivity test: FAILED"
+        echo "💡 Check security groups and network configuration"
+        
+        # Show Redis endpoint details
+        echo "📋 Redis endpoint: $REDIS_ENDPOINT"
+        echo "📋 Host: ${REDIS_ENDPOINT%:*}"
+        echo "📋 Port: ${REDIS_ENDPOINT##*:}"
+    fi
+else
+    echo "⚠️ No LiveKit pods found for connectivity test"
 fi
 
 # Show deployment status
@@ -280,14 +339,14 @@ echo ""
 echo "🌐 Checking ALB LoadBalancer endpoint..."
 
 ALB_ADDRESS=""
-for i in {1..6}; do
+for i in {1..4}; do
     ALB_ADDRESS=$(kubectl get svc -n "$NAMESPACE" "$RELEASE_NAME" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
     if [ -n "$ALB_ADDRESS" ]; then
         break
     fi
-    if [ $i -lt 6 ]; then
-        echo "   Attempt $i/6: ALB provisioning..."
-        sleep 10
+    if [ $i -lt 4 ]; then
+        echo "   Attempt $i/4: ALB provisioning..."
+        sleep 8
     fi
 done
 
@@ -320,6 +379,9 @@ echo ""
 echo "📋 Monitoring Commands:"
 echo "   - Check pods: kubectl get pods -n $NAMESPACE"
 echo "   - Check services: kubectl get svc -n $NAMESPACE"
+echo "   - Check ingress: kubectl get ingress -n $NAMESPACE"
 echo "   - View logs: kubectl logs -n $NAMESPACE -l app.kubernetes.io/name=livekit"
+echo "   - Test Redis: kubectl exec -n $NAMESPACE <pod-name> -- nc -zv ${REDIS_ENDPOINT%:*} ${REDIS_ENDPOINT##*:}"
 echo ""
-echo "💡 Uses correct Helm chart: livekit/livekit-server"
+echo "💡 Uses official LiveKit Helm repository: https://livekit.github.io/charts"
+echo "💡 Uses correct chart: livekit/livekit (not livekit-server)"

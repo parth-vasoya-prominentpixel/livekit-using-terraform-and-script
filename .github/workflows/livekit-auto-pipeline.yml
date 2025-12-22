@@ -243,7 +243,7 @@ jobs:
           CLUSTER_NAME="${{ steps.cluster.outputs.cluster_name }}"
           
           # Reduced wait time
-          sleep 30
+          sleep 20
           
           # Check cluster status
           for i in {1..5}; do
@@ -254,8 +254,8 @@ jobs:
               echo "✅ Cluster is ACTIVE and ready"
               break
             elif [ "$CLUSTER_STATUS" = "CREATING" ]; then
-              echo "⏳ Cluster still creating, waiting 30 seconds..."
-              sleep 30
+              echo "⏳ Cluster still creating, waiting 20 seconds..."
+              sleep 20
             else
               echo "❌ Unexpected cluster status: $CLUSTER_STATUS"
               if [ $i -eq 5 ]; then
@@ -379,8 +379,8 @@ jobs:
                 exit 1
               fi
               
-              echo "⏳ Waiting 15 seconds before retry..."
-              sleep 15
+              echo "⏳ Waiting 10 seconds before retry..."
+              sleep 10
               ATTEMPT=$((ATTEMPT + 1))
             fi
           done

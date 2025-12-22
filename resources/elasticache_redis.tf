@@ -48,14 +48,6 @@ module "redis" {
       protocol                     = "tcp"
       referenced_security_group_id = module.eks_al2023.node_security_group_id
     }
-    ingress_private_subnets = {
-      description = "Redis access from private subnets (EKS pods)"
-      type        = "ingress"
-      from_port   = 6379
-      to_port     = 6379
-      protocol    = "tcp"
-      cidr_blocks = module.vpc.private_subnets_cidr_blocks
-    }
   }
 
   tags = local.tags
