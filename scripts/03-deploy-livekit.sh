@@ -1,270 +1,123 @@
 #!/bin/bash
 
-# LiveKit Deployment Script - Simple and Clean
-# Following official LiveKit documentation exactly
-# Reference: https://docs.livekit.io/deploy/kubernetes/
-
+# LiveKit Deployment Script - Simple Working Setup
 set -e
 
 echo "🎥 LiveKit Deployment"
 echo "===================="
-echo "📋 Following official LiveKit documentation"
-echo ""
 
-# Find and load configuration file
-CONFIG_FILE=""
+# Load config
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+source "$ROOT_DIR/livekit.env"
 
-# Look for config files
-for config in "$ROOT_DIR/livekit.env" "$SCRIPT_DIR/livekit.env" "./livekit.env"; do
-    if [ -f "$config" ]; then
-        CONFIG_FILE="$config"
-        break
-    fi
-done
-
-if [ -z "$CONFIG_FILE" ]; then
-    echo "❌ Configuration file not found: livekit.env"
-    exit 1
-fi
-
-echo "📋 Loading configuration from: $CONFIG_FILE"
-source "$CONFIG_FILE"
-echo "✅ Configuration loaded"
-
-echo ""
-echo "📋 Configuration:"
-echo "   AWS Region: $AWS_REGION"
-echo "   Cluster: $CLUSTER_NAME"
-echo "   Namespace: $NAMESPACE"
-echo "   Release: $RELEASE_NAME"
-echo ""
-
-# Basic verification
-echo "🔍 Basic verification..."
-
-# Check AWS credentials
-if ! aws sts get-caller-identity >/dev/null 2>&1; then
-    echo "❌ AWS credentials not configured"
-    exit 1
-fi
-
-# Update kubeconfig
+# Basic setup
 aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME" >/dev/null 2>&1
+kubectl create namespace "$NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
 
-# Test kubectl
-if ! kubectl get nodes >/dev/null 2>&1; then
-    echo "❌ Cannot connect to cluster"
-    exit 1
-fi
-
-echo "✅ Basic verification passed"
-
-# Get Redis endpoint from Terraform
-echo ""
-echo "🔍 Getting Redis endpoint from Terraform..."
-TERRAFORM_DIR="$ROOT_DIR/resources"
-
-if [ ! -d "$TERRAFORM_DIR" ]; then
-    echo "❌ Terraform directory not found: $TERRAFORM_DIR"
-    exit 1
-fi
-
-cd "$TERRAFORM_DIR"
-
-REDIS_ENDPOINT=$(terraform output -raw redis_cluster_endpoint 2>/dev/null || echo "")
-
-if [ -z "$REDIS_ENDPOINT" ] || [ "$REDIS_ENDPOINT" = "null" ]; then
-    echo "❌ Failed to get Redis endpoint from Terraform"
-    echo "💡 Make sure Redis is deployed: terraform output redis_cluster_endpoint"
-    exit 1
-fi
-
-echo "✅ Redis endpoint: $REDIS_ENDPOINT"
+# Get Redis endpoint
+cd "$ROOT_DIR/resources"
+REDIS_ENDPOINT=$(terraform output -raw redis_cluster_endpoint)
 cd "$ROOT_DIR"
 
-# Setup namespace
-echo ""
-echo "📦 Setting up namespace..."
-if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
-    kubectl create namespace "$NAMESPACE"
-    echo "✅ Namespace created: $NAMESPACE"
-else
-    echo "✅ Namespace exists: $NAMESPACE"
-fi
-
-# Add LiveKit Helm repository
-echo ""
-echo "📦 Setting up LiveKit Helm repository..."
+# Setup Helm
 helm repo add livekit https://helm.livekit.io >/dev/null 2>&1 || true
 helm repo update >/dev/null 2>&1
-echo "✅ LiveKit Helm repository ready"
 
-# Create proper values.yaml for ALB with Ingress (matching manual setup)
-echo ""
-echo "🔧 Creating LiveKit values.yaml..."
+# Check for SSL certificate
+CERT_ARN=$(aws acm list-certificates --region "$AWS_REGION" \
+    --query "CertificateSummaryList[?DomainName=='*.digi-telephony.com'].CertificateArn" \
+    --output text 2>/dev/null | head -1)
+
+USE_TLS=false
+if [ -n "$CERT_ARN" ] && [ "$CERT_ARN" != "None" ]; then
+    CERT_STATUS=$(aws acm describe-certificate --certificate-arn "$CERT_ARN" --region "$AWS_REGION" --query 'Certificate.Status' --output text 2>/dev/null)
+    if [ "$CERT_STATUS" = "ISSUED" ]; then
+        USE_TLS=true
+    fi
+fi
+
+# Create values.yaml
 cat > /tmp/livekit-values.yaml << EOF
+replicaCount: 2
+
 livekit:
-  domain: livekit-eks-tf.digi-telephony.com
   rtc:
     use_external_ip: true
-    port_range_start: 50000
-    port_range_end: 60000
   redis:
     address: $REDIS_ENDPOINT
   keys:
     $API_KEY: $SECRET_KEY
-  metrics:
-    enabled: true
-    prometheus:
-      enabled: true
-      port: 6789
-  resources:
-    requests:
-      cpu: 500m
-      memory: 512Mi
-    limits:
-      cpu: 2000m
-      memory: 2Gi
-  affinity:
-    podAntiAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        - labelSelector:
-            matchExpressions:
-              - key: app
-                operator: In
-                values:
-                  - livekit-livekit-server
-          topologyKey: "kubernetes.io/hostname"
 
-turn:
+ingress:
   enabled: true
-  domain: turn.livekit-eks-tf.digi-telephony.com
-  tls_port: 3478
-  udp_port: 3478
-
-loadBalancer:
-  type: alb
-  tls:
-    - hosts:
-        - livekit-eks-tf.digi-telephony.com
-      certificateArn: arn:aws:acm:us-east-1:918595516608:certificate/d14bec23-8794-45f2-bb79-43c2e27cf79d
-
+  className: "alb"
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
 EOF
 
-echo "✅ LiveKit values.yaml created"
-
-# Deploy LiveKit
-echo ""
-echo "🚀 Deploying LiveKit..."
-echo "📋 Release: $RELEASE_NAME"
-echo "📋 Chart: livekit/livekit-server"
-echo "📋 Namespace: $NAMESPACE"
-echo ""
-
-# Check if release exists and clean up if needed
-if helm status "$RELEASE_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
-    echo "� Fogund existing release - checking health..."
-    
-    # Check if there are any pods
-    EXISTING_PODS=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server --no-headers 2>/dev/null | wc -l || echo "0")
-    
-    if [ "$EXISTING_PODS" -gt 0 ]; then
-        echo "🗑️ Cleaning up existing deployment to avoid conflicts..."
-    else
-        echo "🗑️ Cleaning up failed deployment..."
-    fi
-    
-    # Force cleanup - remove everything
-    echo "🗑️ Performing comprehensive cleanup..."
-    helm uninstall "$RELEASE_NAME" -n "$NAMESPACE" --wait || true
-    
-    # Clean up all possible resources
-    kubectl delete ingress -n "$NAMESPACE" --all --ignore-not-found=true || true
-    kubectl delete svc -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server --ignore-not-found=true || true
-    kubectl delete pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server --force --grace-period=0 --ignore-not-found=true || true
-    kubectl delete hpa -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server --ignore-not-found=true || true
-    kubectl delete deployment -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server --ignore-not-found=true || true
-    
-    echo "⏳ Waiting for cleanup to complete..."
-    sleep 15
-    echo "✅ Cleanup completed - will install fresh"
-    
-    HELM_ACTION="install"
+if [ "$USE_TLS" = true ]; then
+    cat >> /tmp/livekit-values.yaml << EOF
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: $CERT_ARN
+    alb.ingress.kubernetes.io/ssl-redirect: '443'
+EOF
 else
-    echo "📋 No existing release found - will install fresh"
-    HELM_ACTION="install"
+    cat >> /tmp/livekit-values.yaml << EOF
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+EOF
 fi
 
+cat >> /tmp/livekit-values.yaml << EOF
+  hosts:
+    - host: livekit-eks-tf.digi-telephony.com
+      paths:
+        - path: /
+          pathType: Prefix
+
+service:
+  type: ClusterIP
+  port: 7880
+
+resources:
+  limits:
+    cpu: $CPU_LIMIT
+    memory: $MEMORY_LIMIT
+  requests:
+    cpu: $CPU_REQUEST
+    memory: $MEMORY_REQUEST
+EOF
+
+# Clean up existing deployment
+helm uninstall "$RELEASE_NAME" -n "$NAMESPACE" --wait || true
+sleep 10
+
 # Deploy LiveKit
-echo "🔄 Installing LiveKit..."
 helm install "$RELEASE_NAME" livekit/livekit-server \
     -n "$NAMESPACE" \
     -f /tmp/livekit-values.yaml \
     --wait --timeout=10m
 
-echo "✅ LiveKit installed successfully!"
-
-# Wait for ALB Ingress endpoint
-echo ""
-echo "⏳ Waiting for ALB Ingress endpoint..."
-ALB_ENDPOINT=""
-for i in {1..40}; do
-    # Check for Ingress endpoint (ALB creates Ingress, not Service LoadBalancer)
+# Wait for ALB
+echo "⏳ Waiting for ALB..."
+for i in {1..30}; do
     ALB_ENDPOINT=$(kubectl get ingress -n "$NAMESPACE" -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
-    
-    if [ -n "$ALB_ENDPOINT" ] && [ "$ALB_ENDPOINT" != "null" ]; then
-        echo "✅ ALB Ingress endpoint ready: $ALB_ENDPOINT"
+    if [ -n "$ALB_ENDPOINT" ]; then
+        echo "✅ ALB ready: $ALB_ENDPOINT"
         break
     fi
-    
-    echo "   Attempt $i/40: ALB Ingress provisioning..."
-    sleep 15
+    sleep 10
 done
 
 # Show status
-echo ""
-echo "📊 Deployment Status:"
-kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server
-echo ""
-kubectl get svc -n "$NAMESPACE"
-echo ""
+kubectl get pods -n "$NAMESPACE"
 kubectl get ingress -n "$NAMESPACE"
-echo ""
 
-# Final summary
-echo "🎉 LiveKit Deployment Complete!"
-echo "==============================="
-echo ""
-echo "📋 Connection Details:"
-if [ -n "$ALB_ENDPOINT" ] && [ "$ALB_ENDPOINT" != "null" ]; then
-    echo "   ✅ WebSocket URL: ws://$ALB_ENDPOINT"
-    echo "   ✅ HTTP URL: http://$ALB_ENDPOINT"
-    echo "   ✅ ALB Ingress: $ALB_ENDPOINT"
-else
-    echo "   ⏳ ALB Ingress: Still provisioning"
-    echo "   💡 Check: kubectl get ingress -n $NAMESPACE"
+echo "✅ LiveKit deployed!"
+if [ -n "$ALB_ENDPOINT" ]; then
+    echo "🔗 Endpoint: $ALB_ENDPOINT"
 fi
-echo ""
-echo "🔑 API Credentials:"
-echo "   📋 API Key: $API_KEY"
-echo "   📋 Secret: $SECRET_KEY"
-echo ""
-echo "📊 Configuration:"
-echo "   📋 Redis: $REDIS_ENDPOINT"
-echo "   📋 Autoscaling: $MIN_REPLICAS-$MAX_REPLICAS replicas at ${CPU_THRESHOLD}% CPU"
-echo ""
-echo "📋 Monitoring:"
-echo "   - Pods: kubectl get pods -n $NAMESPACE"
-echo "   - Service: kubectl get svc -n $NAMESPACE"
-echo "   - Logs: kubectl logs -n $NAMESPACE -l app.kubernetes.io/name=livekit-server"
-echo ""
-echo "💡 LiveKit is ready for WebRTC connections!"
-echo "💡 Use the LoadBalancer endpoint above for connections"
 
-# Cleanup
 rm -f /tmp/livekit-values.yaml
-
-echo ""
-echo "✅ Deployment completed successfully!"
