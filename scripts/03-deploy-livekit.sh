@@ -105,10 +105,8 @@ echo "✅ LiveKit Helm repository ready"
 echo ""
 echo "🔧 Creating LiveKit values.yaml..."
 cat > /tmp/livekit-values.yaml << EOF
-# LiveKit Configuration - ALB with Ingress (matching manual setup)
-replicaCount: 2
-
 livekit:
+  domain: livekit-eks-tf.digi-telephony.com
   rtc:
     use_external_ip: true
     port_range_start: 50000
@@ -117,29 +115,42 @@ livekit:
     address: $REDIS_ENDPOINT
   keys:
     $API_KEY: $SECRET_KEY
+  metrics:
+    enabled: true
+    prometheus:
+      enabled: true
+      port: 6789
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - livekit-livekit-server
+          topologyKey: "kubernetes.io/hostname"
 
 turn:
   enabled: true
+  domain: turn.livekit-eks-tf.digi-telephony.com
   tls_port: 3478
+  udp_port: 3478
 
-# ALB LoadBalancer configuration (creates Ingress like manual setup)
 loadBalancer:
   type: alb
-  # No TLS for now - HTTP only like you requested
+  tls:
+    - hosts:
+        - livekit-eks-tf.digi-telephony.com
+      certificateArn: arn:aws:acm:us-east-1:918595516608:certificate/d14bec23-8794-45f2-bb79-43c2e27cf79d
 
-autoscaling:
-  enabled: true
-  minReplicas: $MIN_REPLICAS
-  maxReplicas: $MAX_REPLICAS
-  targetCPUUtilizationPercentage: $CPU_THRESHOLD
-
-resources:
-  limits:
-    cpu: $CPU_LIMIT
-    memory: $MEMORY_LIMIT
-  requests:
-    cpu: $CPU_REQUEST
-    memory: $MEMORY_REQUEST
 EOF
 
 echo "✅ LiveKit values.yaml created"
