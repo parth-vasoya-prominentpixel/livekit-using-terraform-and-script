@@ -19,6 +19,7 @@ ENVIRONMENT="${ENVIRONMENT:-dev}"
 LIVEKIT_DOMAIN="livekit-tf.digi-telephony.com"
 TURN_DOMAIN="turn-livekit-tf.digi-telephony.com"
 WILDCARD_DOMAIN="*.digi-telephony.com"
+CERTIFICATE_ARN="arn:aws:acm:us-east-1:918595516608:certificate/388e3ff7-9763-4772-bfef-56cf64fcc414"
 
 # LiveKit configuration
 LIVEKIT_NAMESPACE="livekit"
@@ -294,14 +295,14 @@ echo ""
 echo "📋 Step 8: Creating LiveKit values.yaml..."
 cat > livekit-values.yaml << EOF
 # LiveKit Helm Chart Values for digi-telephony.com
-# Production configuration with wildcard certificate support
+# Production configuration matching your existing deployment
 
-replicaCount: 2
-
-# LiveKit configuration
 livekit:
+  domain: ${LIVEKIT_DOMAIN}
   rtc:
     use_external_ip: true
+    port_range_start: 50000
+    port_range_end: 60000
   
   # Redis configuration
   redis:
@@ -311,42 +312,55 @@ livekit:
   keys:
     ${API_KEY}: ${SECRET_KEY}
   
-  # TURN server configuration
-  turn:
+  # Metrics configuration
+  metrics:
     enabled: true
-    domain: ${TURN_DOMAIN}
-    tls_port: 3478
-    # TLS secret will be created for wildcard certificate
-    secretName: livekit-wildcard-tls
+    prometheus:
+      enabled: true
+      port: 6789
+
+# Resource configuration
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# Pod anti-affinity for better distribution
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+    - labelSelector:
+        matchExpressions:
+        - key: app
+          operator: In
+          values:
+          - livekit-livekit-server
+      topologyKey: "kubernetes.io/hostname"
+
+# TURN server configuration
+turn:
+  enabled: true
+  domain: ${TURN_DOMAIN}
+  tls_port: 3478
+  udp_port: 3478
+  # No secretName needed - will use ALB certificate
 
 # Load Balancer configuration for AWS ALB
 loadBalancer:
   type: alb
-
-# Autoscaling configuration
-autoscaling:
-  enabled: true
-  minReplicas: 1
-  maxReplicas: 5
-  targetCPUUtilizationPercentage: 60
-
-# Resource configuration optimized for production
-resources:
-  limits:
-    cpu: 7500m
-    memory: 2048Mi
-  requests:
-    cpu: 7000m
-    memory: 1024Mi
+  tls:
+    - hosts:
+        - ${LIVEKIT_DOMAIN}
+      certificateArn: ${CERTIFICATE_ARN}
 
 # Service configuration
 service:
   type: ClusterIP
-  annotations:
-    # Use NLB for better performance with LiveKit
-    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
 
-# Ingress configuration for ALB with wildcard certificate
+# Ingress configuration for ALB with your certificate
 ingress:
   enabled: true
   className: alb
@@ -355,9 +369,8 @@ ingress:
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
-    # SSL redirect enabled for production
+    alb.ingress.kubernetes.io/certificate-arn: ${CERTIFICATE_ARN}
     alb.ingress.kubernetes.io/ssl-redirect: '443'
-    # Use modern SSL policy
     alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS-1-2-2017-01
     # Health check configuration
     alb.ingress.kubernetes.io/healthcheck-path: /
@@ -371,12 +384,13 @@ ingress:
       paths:
         - path: /
           pathType: Prefix
-  
-  # TLS configuration for wildcard certificate
-  tls:
-    - secretName: livekit-wildcard-tls
-      hosts:
-        - ${LIVEKIT_DOMAIN}
+
+# Autoscaling configuration
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 60
 
 # Security context
 securityContext:
@@ -396,112 +410,28 @@ serviceAccount:
   annotations: {}
   name: ""
 
-# Node selector for specific instance types (optional)
+# Node selector (optional)
 nodeSelector: {}
 
 # Tolerations (optional)
 tolerations: []
-
-# Affinity for better pod distribution
-affinity:
-  podAntiAffinity:
-    preferredDuringSchedulingIgnoredDuringExecution:
-    - weight: 100
-      podAffinityTerm:
-        labelSelector:
-          matchExpressions:
-          - key: app.kubernetes.io/name
-            operator: In
-            values:
-            - livekit
-        topologyKey: kubernetes.io/hostname
 EOF
 
-echo "✅ LiveKit values.yaml created for digi-telephony.com domains"
+echo "✅ LiveKit values.yaml created with your exact configuration"
+echo "   Domain: $LIVEKIT_DOMAIN"
+echo "   TURN Domain: $TURN_DOMAIN"
+echo "   Certificate ARN: $CERTIFICATE_ARN"
 echo ""
 
-# Step 9: Wildcard Certificate Setup
-echo "📋 Step 9: Wildcard Certificate Setup..."
+# Step 9: Certificate Configuration
+echo "📋 Step 9: Certificate Configuration..."
 echo ""
-echo "🔐 Setting up wildcard certificate for *.digi-telephony.com"
+echo "🔐 Using ACM Certificate for *.digi-telephony.com"
+echo "   Certificate ARN: $CERTIFICATE_ARN"
+echo "   Domain: $LIVEKIT_DOMAIN"
+echo "   TURN Domain: $TURN_DOMAIN"
 echo ""
-echo "⚠️  IMPORTANT: Wildcard Certificate Configuration Required"
-echo ""
-echo "For production deployment with *.digi-telephony.com, you need to:"
-echo ""
-echo "1. 🏭 AWS Certificate Manager (Recommended):"
-echo "   - Import your wildcard certificate (*.digi-telephony.com) to ACM"
-echo "   - Get the certificate ARN from ACM console"
-echo "   - Update ingress annotation:"
-echo "   kubectl annotate ingress livekit -n $LIVEKIT_NAMESPACE \\"
-echo "     alb.ingress.kubernetes.io/certificate-arn=arn:aws:acm:$AWS_REGION:$ACCOUNT_ID:certificate/YOUR-CERT-ID"
-echo ""
-echo "2. 🔧 Manual Certificate (For testing):"
-echo "   kubectl create secret tls livekit-wildcard-tls \\"
-echo "     --cert=wildcard-digi-telephony.crt \\"
-echo "     --key=wildcard-digi-telephony.key \\"
-echo "     -n $LIVEKIT_NAMESPACE"
-echo ""
-echo "3. 🤖 cert-manager (Automated - Advanced):"
-echo "   - Install cert-manager with DNS-01 challenge"
-echo "   - Configure for *.digi-telephony.com domain"
-echo ""
-
-# Ask user how they want to proceed
-echo "Choose certificate setup method:"
-echo "1) I have ACM certificate ARN (Production)"
-echo "2) I have certificate files (Testing)"
-echo "3) Skip TLS for now (Development only)"
-echo "4) Exit and configure manually"
-echo ""
-read -p "Enter choice (1-4): " -n 1 -r CERT_CHOICE
-echo ""
-
-case $CERT_CHOICE in
-    1)
-        echo ""
-        read -p "Enter your ACM certificate ARN: " ACM_CERT_ARN
-        if [[ -n "$ACM_CERT_ARN" ]]; then
-            echo "✅ Will use ACM certificate: $ACM_CERT_ARN"
-            USE_ACM_CERT=true
-        else
-            echo "❌ No certificate ARN provided. Proceeding without TLS."
-            USE_ACM_CERT=false
-        fi
-        ;;
-    2)
-        echo ""
-        read -p "Enter path to certificate file (.crt): " CERT_FILE
-        read -p "Enter path to private key file (.key): " KEY_FILE
-        if [[ -f "$CERT_FILE" && -f "$KEY_FILE" ]]; then
-            echo "✅ Creating TLS secret from certificate files..."
-            kubectl create secret tls livekit-wildcard-tls \
-                --cert="$CERT_FILE" \
-                --key="$KEY_FILE" \
-                -n "$LIVEKIT_NAMESPACE" \
-                --dry-run=client -o yaml | kubectl apply -f -
-            echo "✅ TLS secret created successfully"
-            USE_TLS_SECRET=true
-        else
-            echo "❌ Certificate files not found. Proceeding without TLS."
-            USE_TLS_SECRET=false
-        fi
-        ;;
-    3)
-        echo "⚠️  Proceeding without TLS (Development only)"
-        USE_TLS_SECRET=false
-        USE_ACM_CERT=false
-        ;;
-    4)
-        echo "❌ Deployment cancelled. Please configure certificates manually."
-        exit 1
-        ;;
-    *)
-        echo "❌ Invalid choice. Proceeding without TLS."
-        USE_TLS_SECRET=false
-        USE_ACM_CERT=false
-        ;;
-esac
+echo "✅ Certificate configuration ready"
 echo ""
 
 # Step 10: Deploy LiveKit
@@ -526,17 +456,7 @@ else
 fi
 echo ""
 
-# Step 11: Configure ACM certificate if provided
-if [[ "$USE_ACM_CERT" == "true" && -n "$ACM_CERT_ARN" ]]; then
-    echo "📋 Step 11: Configuring ACM certificate..."
-    kubectl annotate ingress "$LIVEKIT_RELEASE" -n "$LIVEKIT_NAMESPACE" \
-        alb.ingress.kubernetes.io/certificate-arn="$ACM_CERT_ARN" \
-        --overwrite
-    echo "✅ ACM certificate configured"
-    echo ""
-fi
-
-# Step 12: Verify LiveKit deployment
+# Step 11: Verify LiveKit deployment
 echo "📋 Step 12: Verifying LiveKit deployment..."
 
 # Wait for deployment to be ready
@@ -605,17 +525,11 @@ echo "   ✅ Redis Endpoint: $REDIS_ENDPOINT"
 echo "   ✅ LiveKit Domain: $LIVEKIT_DOMAIN"
 echo "   ✅ TURN Domain: $TURN_DOMAIN"
 echo "   ✅ API Key: $API_KEY"
+echo "   ✅ Certificate ARN: $CERTIFICATE_ARN"
 if [[ -n "$ALB_ADDRESS" ]]; then
     echo "   ✅ Load Balancer: $ALB_ADDRESS"
 else
     echo "   ⏳ Load Balancer: Provisioning..."
-fi
-if [[ "$USE_ACM_CERT" == "true" ]]; then
-    echo "   ✅ TLS Certificate: ACM ($ACM_CERT_ARN)"
-elif [[ "$USE_TLS_SECRET" == "true" ]]; then
-    echo "   ✅ TLS Certificate: Manual Secret"
-else
-    echo "   ⚠️  TLS Certificate: Not configured"
 fi
 echo ""
 echo "🔧 Next Steps:"
@@ -623,9 +537,7 @@ echo "   1. Wait for ALB to be fully provisioned (2-3 minutes)"
 echo "   2. Configure DNS records:"
 echo "      - $LIVEKIT_DOMAIN → $ALB_ADDRESS"
 echo "      - $TURN_DOMAIN → $ALB_ADDRESS"
-if [[ "$USE_ACM_CERT" != "true" && "$USE_TLS_SECRET" != "true" ]]; then
-    echo "   3. Configure TLS certificate for production use"
-fi
+echo "   3. Test HTTPS connectivity"
 echo ""
 echo "🧪 Testing Commands:"
 echo "   - Check status: kubectl get all -n $LIVEKIT_NAMESPACE"
@@ -637,9 +549,6 @@ echo "   - https://docs.livekit.io/transport/self-hosting/kubernetes/"
 echo "   - https://kubernetes-sigs.github.io/aws-load-balancer-controller/"
 echo ""
 echo "🎯 Your LiveKit server is ready at:"
-if [[ "$USE_ACM_CERT" == "true" || "$USE_TLS_SECRET" == "true" ]]; then
-    echo "   https://$LIVEKIT_DOMAIN"
-else
-    echo "   http://$LIVEKIT_DOMAIN (configure TLS for https://)"
-fi
+echo "   https://$LIVEKIT_DOMAIN"
+echo "   TURN server: $TURN_DOMAIN:3478"
 echo ""

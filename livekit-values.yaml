@@ -1,58 +1,70 @@
 # LiveKit Helm Chart Values for digi-telephony.com
-# Production configuration with wildcard certificate support
+# Production configuration matching your existing deployment
 
-replicaCount: 2
-
-# LiveKit configuration
 livekit:
+  domain: livekit-tf.digi-telephony.com
   rtc:
     use_external_ip: true
+    port_range_start: 50000
+    port_range_end: 60000
   
   # Redis configuration - UPDATE WITH YOUR REDIS ENDPOINT
   redis:
-    address: <redis-host>:6379
+    address: clustercfg.livekit-redis.x4ncn3.use1.cache.amazonaws.com:6379
   
-  # API keys configuration - UPDATE WITH YOUR KEYS
+  # API keys configuration
   keys:
-    <your-api-key>: <your-secret>
+    APIKmrHi78hxpbd: Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB
   
-  # TURN server configuration
-  turn:
+  # Metrics configuration
+  metrics:
     enabled: true
-    domain: turn-livekit-tf.digi-telephony.com
-    tls_port: 3478
-    # TLS secret for wildcard certificate
-    secretName: livekit-wildcard-tls
+    prometheus:
+      enabled: true
+      port: 6789
+
+# Resource configuration
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# Pod anti-affinity for better distribution
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+    - labelSelector:
+        matchExpressions:
+        - key: app
+          operator: In
+          values:
+          - livekit-livekit-server
+      topologyKey: "kubernetes.io/hostname"
+
+# TURN server configuration
+turn:
+  enabled: true
+  domain: turn-livekit-tf.digi-telephony.com
+  tls_port: 3478
+  udp_port: 3478
+  # No secretName needed - using ALB certificate
 
 # Load Balancer configuration for AWS ALB
 loadBalancer:
   type: alb
-
-# Autoscaling configuration
-autoscaling:
-  enabled: true
-  minReplicas: 1
-  maxReplicas: 5
-  targetCPUUtilizationPercentage: 60
-
-# Resource configuration
-# Resources are set assuming a 8 core instance
-resources:
-  limits:
-    cpu: 7500m
-    memory: 2048Mi
-  requests:
-    cpu: 7000m
-    memory: 1024Mi
+  tls:
+    - hosts:
+        - livekit-tf.digi-telephony.com
+      certificateArn: arn:aws:acm:us-east-1:918595516608:certificate/388e3ff7-9763-4772-bfef-56cf64fcc414
 
 # Service configuration
 service:
   type: ClusterIP
-  annotations:
-    # Use NLB for better performance with LiveKit
-    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
 
-# Ingress configuration for ALB with wildcard certificate
+# Ingress configuration for ALB with your certificate
 ingress:
   enabled: true
   className: alb
@@ -61,17 +73,9 @@ ingress:
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
-    
-    # ⚠️ WILDCARD CERTIFICATE CONFIGURATION FOR *.digi-telephony.com ⚠️
-    # Option 1: Use ACM Certificate ARN (Recommended for production)
-    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:123456789012:certificate/12345678-1234-1234-1234-123456789012
-    
-    # Option 2: SSL Redirect (enable after configuring certificate)
-    # alb.ingress.kubernetes.io/ssl-redirect: '443'
-    
-    # Option 3: Custom SSL Policy
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:918595516608:certificate/388e3ff7-9763-4772-bfef-56cf64fcc414
+    alb.ingress.kubernetes.io/ssl-redirect: '443'
     alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS-1-2-2017-01
-    
     # Health check configuration
     alb.ingress.kubernetes.io/healthcheck-path: /
     alb.ingress.kubernetes.io/healthcheck-interval-seconds: '30'
@@ -84,12 +88,45 @@ ingress:
       paths:
         - path: /
           pathType: Prefix
-  
-  # TLS configuration (for wildcard certificate *.digi-telephony.com)
-  tls:
-    - secretName: livekit-wildcard-tls
-      hosts:
-        - livekit-tf.digi-telephony.com
+
+# Autoscaling configuration
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 60
+
+# Security context
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+# Pod security context
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+# Service account
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# Node selector (optional)
+nodeSelector: {}
+
+# Tolerations (optional)
+tolerations: []
+
+# ✅ CONFIGURATION NOTES:
+# - Domain: livekit-tf.digi-telephony.com
+# - TURN Domain: turn-livekit-tf.digi-telephony.com
+# - Certificate: ACM wildcard certificate for *.digi-telephony.com
+# - Load Balancer: AWS ALB with automatic HTTPS redirect
+# - No manual TLS secrets needed - using ACM certificate
+# - Traffic flows: Internet → ALB → LiveKit Service → LiveKit Pods
 
 # Node selector (optional - use for specific node types)
 nodeSelector: {}
