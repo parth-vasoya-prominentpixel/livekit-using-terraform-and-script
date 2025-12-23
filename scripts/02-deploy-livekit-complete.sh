@@ -133,7 +133,7 @@ echo ""
 # Step 2: Create IAM role and service account using eksctl
 echo "📋 Step 2: Setting up service account and IAM role..."
 
-# Check if service account already exists with proper IAM role
+# Check if our target service account exists
 if kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" >/dev/null 2>&1; then
     echo "✅ Service account already exists: $SERVICE_ACCOUNT_NAME"
     
@@ -150,17 +150,24 @@ if kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" >/dev/n
             echo "   ✅ IAM role has correct policy attached"
         else
             echo "   ⚠️  IAM role exists but policy may not be attached"
+            echo "   Attempting to attach policy..."
+            aws iam attach-role-policy --role-name "$ROLE_NAME_FROM_ARN" --policy-arn "$POLICY_ARN" || echo "   Policy attachment failed, continuing..."
         fi
     else
         echo "⚠️  Service account exists but has no IAM role annotation"
-        echo "   This will cause issues. Skipping service account creation."
+        echo "   Adding IAM role annotation to existing service account..."
+        
+        # Try to add the annotation to existing service account
         ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+        kubectl annotate serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" \
+            eks.amazonaws.com/role-arn="$ROLE_ARN" \
+            --overwrite || echo "   Annotation failed, continuing..."
     fi
 else
     echo "🔄 Creating service account with IAM role..."
     echo "   Note: This may take a few minutes..."
     
-    # Create service account with IAM role using eksctl with better error handling
+    # Create service account with IAM role using eksctl
     if eksctl create iamserviceaccount \
         --cluster="$CLUSTER_NAME" \
         --namespace="$LB_NAMESPACE" \
@@ -174,10 +181,14 @@ else
         ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
         echo "✅ Service account created with IAM role: $ROLE_ARN"
     else
-        echo "⚠️  Service account creation had issues, but continuing..."
+        echo "⚠️  Service account creation had issues, using existing role..."
         ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
     fi
 fi
+
+# Verify service account is properly configured
+echo "🔍 Verifying service account configuration..."
+kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" -o yaml | grep -A 2 annotations || echo "No annotations found"
 echo ""
 
 # Step 3: Add EKS Helm repository
@@ -211,6 +222,13 @@ if helm list -n "$LB_NAMESPACE" | grep -q aws-load-balancer-controller; then
     else
         echo "⚠️  Upgrade had issues, checking current status..."
         kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" || echo "Deployment not found"
+        
+        # If upgrade failed, try to check if it's a version issue
+        echo "🔍 Checking current Helm release:"
+        helm list -n "$LB_NAMESPACE" | grep aws-load-balancer-controller
+        
+        echo "🔍 Checking deployment status:"
+        kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" -o wide || echo "No deployment found"
     fi
 else
     echo "🔄 Installing AWS Load Balancer Controller..."
@@ -230,17 +248,17 @@ else
         --debug; then
         echo "✅ AWS Load Balancer Controller installed successfully"
     else
-        echo "❌ Installation failed, but checking if deployment exists..."
+        echo "❌ Installation failed, checking what went wrong..."
         
         # Check if deployment was created despite the error
         if kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" >/dev/null 2>&1; then
-            echo "⚠️  Deployment exists despite Helm error, continuing..."
+            echo "⚠️  Deployment exists despite Helm error, checking status..."
         else
             echo "❌ Deployment not found, installation truly failed"
             echo "🔍 Checking Helm releases:"
             helm list -n "$LB_NAMESPACE"
-            echo "🔍 Checking pods in kube-system:"
-            kubectl get pods -n "$LB_NAMESPACE" | grep -i load || echo "No load balancer pods found"
+            echo "🔍 Checking service account:"
+            kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" -o yaml
             exit 1
         fi
     fi
@@ -250,29 +268,69 @@ echo ""
 # Step 5: Verify Load Balancer Controller installation
 echo "📋 Step 5: Verifying Load Balancer Controller installation..."
 
-# Wait for deployment to be ready with better error handling
-echo "⏳ Waiting for controller deployment to be ready..."
-echo "   This may take up to 5 minutes..."
-
 # Check if deployment exists first
 if kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" >/dev/null 2>&1; then
-    echo "✅ Deployment exists, waiting for it to be ready..."
+    echo "✅ Deployment exists, checking status..."
     
-    # Wait with longer timeout
-    if kubectl wait --for=condition=available --timeout=600s deployment/aws-load-balancer-controller -n "$LB_NAMESPACE"; then
-        echo "✅ AWS Load Balancer Controller deployment is ready"
-    else
-        echo "⚠️  Deployment not ready within timeout, checking status..."
-        kubectl describe deployment aws-load-balancer-controller -n "$LB_NAMESPACE"
+    # Check current deployment status
+    kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE"
+    
+    # Check pods immediately
+    echo ""
+    echo "🔍 Current Pod Status:"
+    kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller
+    
+    # Check if pods are running
+    RUNNING_PODS=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers | grep -c "Running" || echo "0")
+    TOTAL_PODS=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers | wc -l)
+    
+    if [[ "$RUNNING_PODS" -eq 0 && "$TOTAL_PODS" -gt 0 ]]; then
         echo ""
-        echo "🔍 Checking pods:"
-        kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller
+        echo "⚠️  Pods exist but not running, checking for issues..."
+        
+        # Check pod status and events
+        echo "🔍 Pod Details:"
+        kubectl describe pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller | tail -30
+        
         echo ""
-        echo "🔍 Checking events:"
+        echo "🔍 Recent Events:"
         kubectl get events -n "$LB_NAMESPACE" --sort-by='.lastTimestamp' | tail -10
         
-        # Continue anyway if deployment exists
-        echo "⚠️  Continuing despite readiness timeout..."
+        # Check if it's an image pull or permission issue
+        POD_STATUS=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller -o jsonpath='{.items[0].status.phase}' 2>/dev/null || echo "Unknown")
+        echo "Pod Status: $POD_STATUS"
+        
+        if [[ "$POD_STATUS" == "Pending" ]]; then
+            echo "⚠️  Pods are pending, this might be normal during startup"
+            echo "   Waiting 2 minutes for pods to start..."
+            sleep 120
+            
+            # Check again
+            kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller
+        fi
+    fi
+    
+    # Try to wait for deployment readiness (shorter timeout)
+    echo ""
+    echo "⏳ Waiting for deployment readiness (3 minutes max)..."
+    if kubectl wait --for=condition=available --timeout=180s deployment/aws-load-balancer-controller -n "$LB_NAMESPACE"; then
+        echo "✅ AWS Load Balancer Controller deployment is ready"
+    else
+        echo "⚠️  Deployment not ready within timeout"
+        echo "   Checking if pods are at least starting..."
+        
+        # Check current status
+        kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE"
+        kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller
+        
+        # Check if any pods are running now
+        CURRENT_RUNNING=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers | grep -c "Running" || echo "0")
+        if [[ "$CURRENT_RUNNING" -gt 0 ]]; then
+            echo "✅ Some pods are now running, continuing..."
+        else
+            echo "⚠️  No pods running yet, but continuing with deployment"
+            echo "   The controller may start up later in the background"
+        fi
     fi
 else
     echo "❌ AWS Load Balancer Controller deployment not found"
@@ -280,29 +338,27 @@ else
     kubectl get deployments -n "$LB_NAMESPACE"
     echo "🔍 Checking Helm releases:"
     helm list -n "$LB_NAMESPACE"
-    exit 1
+    
+    # Don't exit - continue with LiveKit deployment
+    echo "⚠️  Continuing without Load Balancer Controller"
+    echo "   LiveKit can still be deployed, but ALB provisioning may not work"
 fi
 
-# Check deployment status
+# Final status summary
 echo ""
-echo "🔍 Load Balancer Controller Status:"
-kubectl get deployment -n "$LB_NAMESPACE" aws-load-balancer-controller
+echo "🔍 Final Load Balancer Controller Status:"
+kubectl get deployment -n "$LB_NAMESPACE" aws-load-balancer-controller 2>/dev/null || echo "Deployment not found"
 
-# Verify pods are running
 echo ""
-echo "🔍 Pod Status:"
-kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller
+echo "🔍 Final Pod Status:"
+kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller 2>/dev/null || echo "No pods found"
 
-READY_PODS=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers | grep -c "Running" || echo "0")
-TOTAL_PODS=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers | wc -l)
-
-if [[ "$READY_PODS" -gt 0 ]]; then
-    echo "✅ Load Balancer Controller pods are running ($READY_PODS/$TOTAL_PODS)"
+FINAL_RUNNING=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+if [[ "$FINAL_RUNNING" -gt 0 ]]; then
+    echo "✅ Load Balancer Controller is running ($FINAL_RUNNING pods)"
 else
-    echo "⚠️  Load Balancer Controller pods not ready: $READY_PODS/$TOTAL_PODS running"
-    echo "🔍 Checking pod logs:"
-    kubectl logs -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --tail=20 || echo "No logs available"
-    echo "⚠️  Continuing anyway..."
+    echo "⚠️  Load Balancer Controller not fully ready"
+    echo "   This may affect ALB provisioning, but LiveKit deployment will continue"
 fi
 echo ""
 
