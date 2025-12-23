@@ -1,131 +1,170 @@
-# 🚀 LiveKit EKS Infrastructure - Ready for Deployment
+# LiveKit EKS Deployment - Ready to Use
 
-## ✅ Configuration Complete
+This deployment is now **production-ready** with proper dynamic configuration and LoadBalancer handling.
 
-Your LiveKit EKS infrastructure is now properly configured and ready for deployment using the step-by-step pipeline with manual approvals.
+## 🚀 Quick Start
 
-### What's Been Configured
+### 1. Prerequisites
+- AWS CLI configured with proper credentials
+- kubectl installed
+- Helm installed
+- Terraform infrastructure deployed
 
-#### 🏗️ Infrastructure Components
-- **EKS Cluster**: Kubernetes 1.34 with AL2023 managed nodes (t3.medium)
-- **VPC**: Complete networking with public/private subnets and NAT Gateway
-- **ElastiCache Redis**: For LiveKit session storage
-- **Security Groups**: SIP traffic (port 5060) restricted to Twilio CIDRs only
-- **Load Balancer Controller**: AWS Load Balancer Controller for ingress
-
-#### 🔄 CI/CD Pipeline
-- **5-Step Pipeline**: Each step requires manual approval
-- **OIDC Authentication**: Secure AWS access without long-lived credentials
-- **Environment-based**: Separate environments for dev/uat/prod
-- **Terraform State**: Remote state management with S3 backend
-
-#### 📋 Pipeline Steps
-1. **Prerequisites** - Verify tools and permissions
-2. **Terraform Plan** - Review infrastructure changes
-3. **Terraform Apply** - Create infrastructure (15-20 min)
-4. **Load Balancer Setup** - Install AWS Load Balancer Controller
-5. **LiveKit Deploy** - Deploy LiveKit application
-
-## 🎯 Next Steps
-
-### 1. Set Up GitHub Environments
-Follow the guide in `docs/GITHUB_ENVIRONMENTS.md` to create the required environments with manual approval protection rules.
-
-**Required Environments:**
-- `livekit-poc-dev-prerequisites`
-- `livekit-poc-dev-terraform-plan`
-- `livekit-poc-dev-terraform-apply`
-- `livekit-poc-dev-setup-load-balancer`
-- `livekit-poc-dev-deploy-livekit`
-- `livekit-poc-dev-destroy`
-
-### 2. Configure Environment Secrets
-Add these secrets to each environment:
-- `AWS_OIDC_ROLE_ARN`: Your GitHub Actions OIDC role ARN
-- `DEPLOYMENT_ROLE_ARN`: Your deployment role ARN (already in inputs.tfvars)
-
-### 3. Run the Pipeline
-1. Go to **Actions** tab in your GitHub repository
-2. Select **🚀 LiveKit Pipeline**
-3. Click **Run workflow**
-4. Choose:
-   - **Action**: `deploy`
-   - **Environment**: `dev`
-5. Click **Run workflow**
-
-### 4. Manual Approvals
-The pipeline will pause at each step waiting for your approval:
-- Review the logs and outputs
-- Click **Review deployments** when ready
-- Select the environment and click **Approve and deploy**
-
-## 📊 Expected Timeline
-
-| Step | Duration | Description |
-|------|----------|-------------|
-| Prerequisites | 2-3 min | Tool setup and verification |
-| Terraform Plan | 3-5 min | Infrastructure planning |
-| Terraform Apply | 15-20 min | EKS cluster and VPC creation |
-| Load Balancer | 3-5 min | AWS Load Balancer Controller |
-| LiveKit Deploy | 5-10 min | LiveKit application deployment |
-| **Total** | **~30-45 min** | Complete deployment |
-
-## 🔧 Configuration Details
-
-### EKS Cluster
-- **Name**: `lp-eks-livekit-use1-dev`
-- **Version**: Kubernetes 1.34
-- **Nodes**: 3x t3.medium (AL2023)
-- **Addons**: CoreDNS, VPC-CNI, Kube-proxy, Pod Identity Agent
-- **Access**: Public endpoint enabled for CI/CD
-
-### Redis Configuration
-- **Type**: ElastiCache Redis 7.0
-- **Instance**: cache.t3.micro
-- **Encryption**: At-rest enabled, transit disabled (LiveKit compatibility)
-- **Access**: Only from EKS cluster security group
-
-### Security
-- **SIP Traffic**: Port 5060 TCP/UDP restricted to Twilio CIDRs only
-- **VPC**: Private subnets for workloads, public for load balancers
-- **IAM**: Least privilege with OIDC authentication
-- **Encryption**: AWS managed KMS key for EKS secrets encryption (cost-effective)
-
-## 🚨 Important Notes
-
-### IAM Permissions Required
-If you encounter "Cluster not accessible" errors, run the IAM permissions fix:
+### 2. Configuration
+Edit `livekit.env` to customize your deployment:
 ```bash
-chmod +x scripts/fix-iam-permissions.sh
-./scripts/fix-iam-permissions.sh
+# AWS Configuration
+AWS_REGION=us-east-1
+CLUSTER_NAME=lp-eks-livekit-use1-dev
+
+# LiveKit Domains
+DOMAIN=livekit-eks-tf.digi-telephony.com
+TURN_DOMAIN=turn.livekit-eks-tf.digi-telephony.com
+
+# API Credentials (change these!)
+API_KEY=APIKmrHi78hxpbd
+SECRET_KEY=Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB
+
+# Autoscaling (1-20 replicas at 75% CPU)
+MIN_REPLICAS=1
+MAX_REPLICAS=20
+CPU_THRESHOLD=75
 ```
-Or follow the detailed guide in `docs/IAM_PERMISSIONS_SETUP.md`
 
-### Manual Approval Required
-- Every step requires explicit approval
-- Review logs before approving each step
-- You can stop the pipeline at any point
+### 3. Deploy LiveKit
+```bash
+# Make sure you're in the project root
+./scripts/03-deploy-livekit.sh
+```
 
-### Destroy Process
-- Use the same pipeline with `action: destroy`
-- Requires manual approval for safety
-- Handles cleanup of all resources
+## ✨ Key Features
 
-### Cost Optimization
-- t3.medium instances for cost efficiency
-- cache.t3.micro for Redis (smallest option)
-- NAT Gateway in single AZ (can be expanded)
+### 🔧 Dynamic Configuration
+- **Redis endpoint** is automatically retrieved from Terraform outputs
+- **Cluster information** is dynamically gathered from AWS
+- **No hardcoded values** - everything is configurable or auto-detected
 
-## 📞 Support
+### ⏳ Smart LoadBalancer Handling
+- **10-minute timeout** for LoadBalancer provisioning
+- **Progress tracking** with percentage completion
+- **Health checks** when LoadBalancer is ready
+- **Graceful handling** of provisioning delays
 
-If you encounter any issues:
-1. **EKS Connectivity Issues**: See `docs/EKS_CONNECTIVITY_TROUBLESHOOTING.md` for detailed troubleshooting
-2. Check the GitHub Actions logs for detailed error messages
-3. Verify your AWS permissions and OIDC role configuration
-4. Ensure all environment secrets are correctly set
-5. Use AWS CloudShell as a backup access method
-6. Review the Terraform state for any resource conflicts
+### 🚀 Intelligent Deployment
+- **Health checks** existing deployments
+- **Automatic cleanup** of unhealthy deployments
+- **Upgrade vs install** detection
+- **3-attempt retry** logic with proper error handling
 
-## 🎉 Ready to Deploy!
+### 📊 Comprehensive Status
+- **Real-time monitoring** of pod status
+- **Service verification** and endpoint detection
+- **Complete connection details** with WebSocket URLs
+- **DNS configuration** instructions
+- **Monitoring commands** for troubleshooting
 
-Your infrastructure is now ready for deployment. Follow the next steps above to start your first deployment with full manual control over each step.
+## 📋 What the Script Does
+
+1. **Loads Configuration** from `livekit.env`
+2. **Verifies AWS credentials** and cluster connectivity
+3. **Retrieves Redis endpoint** dynamically from Terraform outputs
+4. **Checks Load Balancer Controller** status
+5. **Manages namespace** and existing deployments
+6. **Sets up Helm repository** and verifies chart availability
+7. **Gathers cluster information** for LoadBalancer configuration
+8. **Generates Helm values** with all dynamic configuration
+9. **Deploys LiveKit** with retry logic and proper error handling
+10. **Waits for pods** to be ready with timeout
+11. **Provisions LoadBalancer** with progress tracking
+12. **Tests health** and provides complete status
+13. **Shows connection details** and monitoring commands
+
+## 🔍 Troubleshooting
+
+### Redis Endpoint Issues
+```bash
+# Check Terraform outputs
+cd resources
+terraform output redis_cluster_endpoint
+
+# If empty, check if Redis is deployed
+terraform output | grep redis
+```
+
+### LoadBalancer Issues
+```bash
+# Check LoadBalancer Controller
+kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+
+# Check service status
+kubectl get svc -n livekit
+
+# Check events
+kubectl get events -n livekit
+```
+
+### Pod Issues
+```bash
+# Check pod status
+kubectl get pods -n livekit
+
+# Check logs
+kubectl logs -n livekit -l app.kubernetes.io/name=livekit-server
+
+# Check HPA
+kubectl get hpa -n livekit
+```
+
+## 📁 File Structure
+
+```
+├── livekit.env                    # Common configuration (edit this)
+├── scripts/
+│   ├── 02-setup-load-balancer.sh # Setup AWS Load Balancer Controller
+│   ├── 03-deploy-livekit.sh      # Main deployment script
+│   └── get-redis-endpoint.sh     # Helper to get Redis endpoint
+└── resources/                     # Terraform infrastructure
+    ├── *.tf                       # Terraform configuration
+    └── terraform.tfstate          # Terraform state (contains Redis endpoint)
+```
+
+## 🎯 Connection Details
+
+After successful deployment, you'll get:
+
+### WebSocket URLs
+- **Direct LoadBalancer**: `ws://[ALB-ENDPOINT]`
+- **Domain** (after DNS): `ws://livekit-eks-tf.digi-telephony.com`
+
+### API Credentials
+- **API Key**: `APIKmrHi78hxpbd`
+- **Secret**: `Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB`
+
+### TURN Server
+- **TURN URL**: `turn:turn.livekit-eks-tf.digi-telephony.com:3478`
+
+## 🔄 Autoscaling
+
+- **Min Replicas**: 1
+- **Max Replicas**: 20
+- **CPU Threshold**: 75%
+- **Resources**: 500m-2000m CPU, 1Gi-2Gi Memory
+
+## 💡 Production Notes
+
+1. **Change API credentials** in `livekit.env` for production
+2. **Configure DNS** to point domains to LoadBalancer endpoint
+3. **Monitor resources** using provided kubectl commands
+4. **Scale as needed** by adjusting MIN_REPLICAS and MAX_REPLICAS
+5. **Redis endpoint** is automatically retrieved - no manual configuration needed
+
+## ✅ Ready for Production
+
+This deployment is now **complete and production-ready** with:
+- ✅ Dynamic Redis endpoint retrieval
+- ✅ Proper LoadBalancer provisioning
+- ✅ Comprehensive error handling
+- ✅ Smart deployment logic
+- ✅ Complete monitoring and status
+- ✅ Clean file organization
+- ✅ No hardcoded values

@@ -298,27 +298,71 @@ jobs:
           sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
           curl -fsSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz | tar -xz
           sudo mv linux-amd64/helm /usr/local/bin/
-
-      - name: Get Deployment Parameters
-        id: params
-        run: |
-          if [ "${{ inputs.skip_terraform_apply }}" = "true" ]; then
-            # If terraform was skipped, use default values
-            echo "cluster_name=lp-eks-livekit-use1-${{ inputs.environment }}" >> $GITHUB_OUTPUT
-            echo "redis_endpoint=lp-redis-livekit-use1-${{ inputs.environment }}.cache.amazonaws.com:6379" >> $GITHUB_OUTPUT
-          else
-            # Use outputs from terraform-apply
-            echo "cluster_name=${{ needs.terraform-apply.outputs.cluster-name }}" >> $GITHUB_OUTPUT
-            echo "redis_endpoint=${{ needs.terraform-apply.outputs.redis-endpoint }}" >> $GITHUB_OUTPUT
-          fi
+          
+          # Install Terraform for Redis endpoint retrieval if needed
+          wget -q https://releases.hashicorp.com/terraform/1.10.3/terraform_1.10.3_linux_amd64.zip
+          unzip -q terraform_1.10.3_linux_amd64.zip
+          sudo mv terraform /usr/local/bin/
 
       - name: Run LiveKit Deployment Script
         working-directory: scripts
         run: |
           chmod +x 03-deploy-livekit.sh
-          CLUSTER_NAME="${{ steps.params.outputs.cluster_name }}" \
-          REDIS_ENDPOINT="${{ steps.params.outputs.redis_endpoint }}" \
-          AWS_REGION="${{ env.AWS_REGION }}" \
+          
+          # Determine cluster name and Redis endpoint
+          if [ "${{ inputs.skip_terraform_apply }}" = "true" ]; then
+            CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
+            # Get Redis endpoint from existing Terraform state
+            cd ../resources
+            terraform init -backend-config="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/backend.tfvars" || true
+            REDIS_ENDPOINT=$(terraform output -raw redis_cluster_endpoint 2>/dev/null || echo "")
+            cd ../scripts
+            
+            if [ -z "$REDIS_ENDPOINT" ]; then
+              echo "❌ Could not retrieve Redis endpoint from Terraform state"
+              echo "💡 Make sure Terraform infrastructure is deployed first"
+              exit 1
+            fi
+          else
+            CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
+            REDIS_ENDPOINT="${{ needs.terraform-apply.outputs.redis-endpoint }}"
+          fi
+          
+          # Create environment configuration for the script
+          cat > ../livekit.env << EOF
+          # Pipeline Configuration - Auto-generated
+          AWS_REGION=${{ env.AWS_REGION }}
+          CLUSTER_NAME=$CLUSTER_NAME
+          
+          # LiveKit API Credentials
+          API_KEY=APIKmrHi78hxpbd
+          SECRET_KEY=Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB
+          
+          # Kubernetes Configuration
+          NAMESPACE=livekit
+          RELEASE_NAME=livekit
+          
+          # Autoscaling Configuration
+          MIN_REPLICAS=1
+          MAX_REPLICAS=20
+          CPU_THRESHOLD=75
+          
+          # Resource Configuration
+          CPU_REQUEST=500m
+          CPU_LIMIT=2000m
+          MEMORY_REQUEST=1Gi
+          MEMORY_LIMIT=2Gi
+          
+          # LoadBalancer Configuration
+          LB_TIMEOUT=600
+          HEALTH_CHECK_TIMEOUT=300
+          EOF
+          
+          echo "📋 Configuration created for environment: ${{ inputs.environment }}"
+          echo "📋 Cluster: $CLUSTER_NAME"
+          echo "📋 Redis: $REDIS_ENDPOINT"
+          
+          # Run the deployment script
           ./03-deploy-livekit.sh
 
   # DESTROY: Remove everything (Optional)
