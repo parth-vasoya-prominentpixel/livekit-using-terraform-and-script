@@ -1,0 +1,37 @@
+# Common Configuration for LiveKit EKS Deployment
+# This file is used by all scripts and pipelines
+# Modify these values as needed for your environment
+
+# AWS Configuration
+AWS_REGION=us-east-1
+CLUSTER_NAME=lp-eks-livekit-use1-dev
+
+# LiveKit Domains
+DOMAIN=livekit-eks-tf.digi-telephony.com
+TURN_DOMAIN=turn.livekit-eks-tf.digi-telephony.com
+
+# Redis Configuration
+REDIS_ENDPOINT=lp-ec-redis-use1-dev-redis.x4ncn3.ng.0001.use1.cache.amazonaws.com:6379
+
+# LiveKit API Credentials
+API_KEY=APIKmrHi78hxpbd
+SECRET_KEY=Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB
+
+# Kubernetes Configuration
+NAMESPACE=livekit
+RELEASE_NAME=livekit
+
+# Autoscaling Configuration
+MIN_REPLICAS=1
+MAX_REPLICAS=20
+CPU_THRESHOLD=75
+
+# Resource Configuration
+CPU_REQUEST=500m
+CPU_LIMIT=2000m
+MEMORY_REQUEST=1Gi
+MEMORY_LIMIT=2Gi
+
+# LoadBalancer Configuration
+LB_TIMEOUT=600  # 10 minutes timeout for LoadBalancer provisioning
+HEALTH_CHECK_TIMEOUT=300  # 5 minutes timeout for health checks
