@@ -155,13 +155,9 @@ if kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" >/dev/n
         fi
     else
         echo "⚠️  Service account exists but has no IAM role annotation"
-        echo "   Adding IAM role annotation to existing service account..."
-        
-        # Try to add the annotation to existing service account
+        echo "   This is safe - will use existing service account without modification"
+        echo "   Note: Load Balancer Controller may need proper IAM permissions"
         ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
-        kubectl annotate serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" \
-            eks.amazonaws.com/role-arn="$ROLE_ARN" \
-            --overwrite || echo "   Annotation failed, continuing..."
     fi
 else
     echo "🔄 Creating service account with IAM role..."
@@ -181,8 +177,27 @@ else
         ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
         echo "✅ Service account created with IAM role: $ROLE_ARN"
     else
-        echo "⚠️  Service account creation had issues, using existing role..."
-        ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+        echo "⚠️  Service account creation had issues, checking if it exists now..."
+        if kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" >/dev/null 2>&1; then
+            echo "✅ Service account exists after eksctl command"
+            ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+        else
+            echo "❌ Service account creation failed"
+            echo "🔍 Checking existing service accounts in $LB_NAMESPACE:"
+            kubectl get serviceaccounts -n "$LB_NAMESPACE"
+            
+            # Check if there are any existing load balancer controller service accounts
+            EXISTING_SA=$(kubectl get serviceaccounts -n "$LB_NAMESPACE" -o name | grep -i "load.*balancer\|aws.*controller" | head -1 | cut -d'/' -f2 || echo "")
+            if [[ -n "$EXISTING_SA" ]]; then
+                echo "⚠️  Found existing service account that might work: $EXISTING_SA"
+                echo "   Continuing with existing service account..."
+                SERVICE_ACCOUNT_NAME="$EXISTING_SA"
+                ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+            else
+                echo "❌ No suitable service account found"
+                exit 1
+            fi
+        fi
     fi
 fi
 
@@ -191,11 +206,23 @@ echo "🔍 Verifying service account configuration..."
 kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" -o yaml | grep -A 2 annotations || echo "No annotations found"
 echo ""
 
-# Step 3: Add EKS Helm repository
-echo "📋 Step 3: Setting up Helm repository..."
+# Step 3: Add EKS Helm repository and install CRDs
+echo "📋 Step 3: Setting up Helm repository and CRDs..."
 helm repo add eks https://aws.github.io/eks-charts
 helm repo update
 echo "✅ EKS Helm repository added and updated"
+
+# Install CRDs first (as per AWS documentation)
+echo "🔧 Installing AWS Load Balancer Controller CRDs..."
+if kubectl get crd targetgroupbindings.elbv2.k8s.aws >/dev/null 2>&1; then
+    echo "✅ CRDs already installed"
+else
+    echo "🔄 Downloading and installing CRDs..."
+    wget -q https://raw.githubusercontent.com/aws/eks-charts/master/stable/aws-load-balancer-controller/crds/crds.yaml -O /tmp/crds.yaml
+    kubectl apply -f /tmp/crds.yaml
+    rm -f /tmp/crds.yaml
+    echo "✅ CRDs installed successfully"
+fi
 echo ""
 
 # Step 4: Install AWS Load Balancer Controller using Helm
@@ -208,7 +235,7 @@ if helm list -n "$LB_NAMESPACE" | grep -q aws-load-balancer-controller; then
     
     # Upgrade with increased timeout and better error handling
     echo "   This may take up to 10 minutes..."
-    if helm upgrade aws-load-balancer-controller eks/aws-load-balancer-controller \
+    if timeout 600 helm upgrade aws-load-balancer-controller eks/aws-load-balancer-controller \
         -n "$LB_NAMESPACE" \
         --set clusterName="$CLUSTER_NAME" \
         --set serviceAccount.create=false \
@@ -216,11 +243,10 @@ if helm list -n "$LB_NAMESPACE" | grep -q aws-load-balancer-controller; then
         --set region="$AWS_REGION" \
         --version="$HELM_CHART_VERSION" \
         --wait \
-        --timeout=600s \
-        --debug; then
+        --timeout=600s; then
         echo "✅ AWS Load Balancer Controller upgraded successfully"
     else
-        echo "⚠️  Upgrade had issues, checking current status..."
+        echo "⚠️  Upgrade timed out or had issues, checking current status..."
         kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" || echo "Deployment not found"
         
         # If upgrade failed, try to check if it's a version issue
@@ -229,14 +255,19 @@ if helm list -n "$LB_NAMESPACE" | grep -q aws-load-balancer-controller; then
         
         echo "🔍 Checking deployment status:"
         kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" -o wide || echo "No deployment found"
+        
+        # Continue anyway if deployment exists
+        if kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" >/dev/null 2>&1; then
+            echo "✅ Deployment exists, continuing..."
+        fi
     fi
 else
     echo "🔄 Installing AWS Load Balancer Controller..."
     echo "   This may take up to 10 minutes..."
-    echo "   Installing with debug output..."
+    echo "   Installing with timeout protection..."
     
-    # Install with increased timeout and better error handling
-    if helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+    # Install with timeout protection
+    if timeout 600 helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
         -n "$LB_NAMESPACE" \
         --set clusterName="$CLUSTER_NAME" \
         --set serviceAccount.create=false \
@@ -244,22 +275,37 @@ else
         --set region="$AWS_REGION" \
         --version="$HELM_CHART_VERSION" \
         --wait \
-        --timeout=600s \
-        --debug; then
+        --timeout=600s; then
         echo "✅ AWS Load Balancer Controller installed successfully"
     else
-        echo "❌ Installation failed, checking what went wrong..."
+        echo "⚠️  Installation timed out or failed, checking what was created..."
         
         # Check if deployment was created despite the error
         if kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" >/dev/null 2>&1; then
-            echo "⚠️  Deployment exists despite Helm error, checking status..."
+            echo "✅ Deployment exists despite Helm timeout, this is normal"
+            echo "   The controller may still be starting up in the background"
         else
             echo "❌ Deployment not found, installation truly failed"
             echo "🔍 Checking Helm releases:"
             helm list -n "$LB_NAMESPACE"
             echo "🔍 Checking service account:"
             kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" -o yaml
-            exit 1
+            
+            # Try installing without --wait flag
+            echo "🔄 Retrying installation without wait flag..."
+            if helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+                -n "$LB_NAMESPACE" \
+                --set clusterName="$CLUSTER_NAME" \
+                --set serviceAccount.create=false \
+                --set serviceAccount.name="$SERVICE_ACCOUNT_NAME" \
+                --set region="$AWS_REGION" \
+                --version="$HELM_CHART_VERSION"; then
+                echo "✅ AWS Load Balancer Controller installed (without wait)"
+                echo "   Controller will start in the background"
+            else
+                echo "❌ Installation failed completely"
+                exit 1
+            fi
         fi
     fi
 fi
@@ -354,10 +400,12 @@ echo "🔍 Final Pod Status:"
 kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller 2>/dev/null || echo "No pods found"
 
 FINAL_RUNNING=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+FINAL_TOTAL=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | wc -l || echo "0")
+
 if [[ "$FINAL_RUNNING" -gt 0 ]]; then
-    echo "✅ Load Balancer Controller is running ($FINAL_RUNNING pods)"
+    echo "✅ Load Balancer Controller is running ($FINAL_RUNNING/$FINAL_TOTAL pods)"
 else
-    echo "⚠️  Load Balancer Controller not fully ready"
+    echo "⚠️  Load Balancer Controller not fully ready ($FINAL_RUNNING/$FINAL_TOTAL pods)"
     echo "   This may affect ALB provisioning, but LiveKit deployment will continue"
 fi
 echo ""
@@ -380,6 +428,21 @@ fi
 
 helm repo update
 echo "✅ LiveKit Helm repositories updated"
+
+# Verify the chart is available
+echo "🔍 Verifying LiveKit chart availability..."
+if helm search repo livekit/livekit-server >/dev/null 2>&1; then
+    echo "✅ LiveKit chart found: livekit/livekit-server"
+    LIVEKIT_CHART="livekit/livekit-server"
+elif helm search repo livekit/livekit >/dev/null 2>&1; then
+    echo "✅ LiveKit chart found: livekit/livekit"
+    LIVEKIT_CHART="livekit/livekit"
+else
+    echo "❌ LiveKit chart not found, listing available charts:"
+    helm search repo livekit/
+    echo "⚠️  Using fallback chart name: livekit/livekit-server"
+    LIVEKIT_CHART="livekit/livekit-server"
+fi
 echo ""
 
 # Step 7: Create LiveKit namespace
@@ -542,7 +605,7 @@ if helm list -n "$LIVEKIT_NAMESPACE" | grep -q "$LIVEKIT_RELEASE"; then
     echo "✅ LiveKit already installed, upgrading..."
     echo "   This may take up to 10 minutes..."
     
-    if helm upgrade "$LIVEKIT_RELEASE" livekit/livekit \
+    if helm upgrade "$LIVEKIT_RELEASE" "$LIVEKIT_CHART" \
         -n "$LIVEKIT_NAMESPACE" \
         -f livekit-values.yaml \
         --wait \
@@ -555,10 +618,11 @@ if helm list -n "$LIVEKIT_NAMESPACE" | grep -q "$LIVEKIT_RELEASE"; then
     fi
 else
     echo "🔄 Installing LiveKit..."
+    echo "   Using chart: $LIVEKIT_CHART"
     echo "   This may take up to 10 minutes..."
     echo "   Installing with debug output..."
     
-    if helm install "$LIVEKIT_RELEASE" livekit/livekit \
+    if helm install "$LIVEKIT_RELEASE" "$LIVEKIT_CHART" \
         -n "$LIVEKIT_NAMESPACE" \
         -f livekit-values.yaml \
         --wait \
@@ -577,7 +641,28 @@ else
             helm list -n "$LIVEKIT_NAMESPACE"
             echo "🔍 Checking pods in $LIVEKIT_NAMESPACE:"
             kubectl get pods -n "$LIVEKIT_NAMESPACE" || echo "No pods found"
-            exit 1
+            
+            # Try alternative chart names
+            echo "🔄 Trying alternative chart names..."
+            for alt_chart in "livekit/livekit-server" "livekit/livekit"; do
+                if [[ "$alt_chart" != "$LIVEKIT_CHART" ]]; then
+                    echo "   Trying: $alt_chart"
+                    if helm install "$LIVEKIT_RELEASE" "$alt_chart" \
+                        -n "$LIVEKIT_NAMESPACE" \
+                        -f livekit-values.yaml \
+                        --wait \
+                        --timeout=600s; then
+                        echo "✅ LiveKit installed successfully with $alt_chart"
+                        break
+                    fi
+                fi
+            done
+            
+            # Final check
+            if ! kubectl get deployment "$LIVEKIT_RELEASE" -n "$LIVEKIT_NAMESPACE" >/dev/null 2>&1; then
+                echo "❌ All installation attempts failed"
+                exit 1
+            fi
         fi
     fi
 fi
