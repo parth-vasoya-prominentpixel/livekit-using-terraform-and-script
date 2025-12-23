@@ -125,6 +125,10 @@ turn:
 loadBalancer:
   type: alb
 
+# Disable ingress to avoid conflicts
+ingress:
+  enabled: false
+
 autoscaling:
   enabled: true
   minReplicas: $MIN_REPLICAS
@@ -150,22 +154,44 @@ echo "📋 Chart: livekit/livekit-server"
 echo "📋 Namespace: $NAMESPACE"
 echo ""
 
-# Check if release exists
+# Check if release exists and clean up if needed
 if helm status "$RELEASE_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
-    echo "🔄 Upgrading existing release..."
-    helm upgrade "$RELEASE_NAME" livekit/livekit-server \
-        -n "$NAMESPACE" \
-        -f /tmp/livekit-values.yaml \
-        --wait --timeout=10m
-    echo "✅ LiveKit upgraded successfully!"
+    echo "� Fogund existing release - checking health..."
+    
+    # Check if there are any pods
+    EXISTING_PODS=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server --no-headers 2>/dev/null | wc -l || echo "0")
+    
+    if [ "$EXISTING_PODS" -gt 0 ]; then
+        echo "🗑️ Cleaning up existing deployment to avoid conflicts..."
+    else
+        echo "🗑️ Cleaning up failed deployment..."
+    fi
+    
+    # Force cleanup
+    helm uninstall "$RELEASE_NAME" -n "$NAMESPACE" --wait || true
+    
+    # Clean up any remaining resources
+    kubectl delete ingress -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server --ignore-not-found=true || true
+    kubectl delete pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server --force --grace-period=0 --ignore-not-found=true || true
+    
+    echo "⏳ Waiting for cleanup to complete..."
+    sleep 10
+    echo "✅ Cleanup completed - will install fresh"
+    
+    HELM_ACTION="install"
 else
-    echo "🔄 Installing new release..."
-    helm install "$RELEASE_NAME" livekit/livekit-server \
-        -n "$NAMESPACE" \
-        -f /tmp/livekit-values.yaml \
-        --wait --timeout=10m
-    echo "✅ LiveKit installed successfully!"
+    echo "📋 No existing release found - will install fresh"
+    HELM_ACTION="install"
 fi
+
+# Deploy LiveKit
+echo "🔄 Installing LiveKit..."
+helm install "$RELEASE_NAME" livekit/livekit-server \
+    -n "$NAMESPACE" \
+    -f /tmp/livekit-values.yaml \
+    --wait --timeout=10m
+
+echo "✅ LiveKit installed successfully!"
 
 # Wait for LoadBalancer
 echo ""
