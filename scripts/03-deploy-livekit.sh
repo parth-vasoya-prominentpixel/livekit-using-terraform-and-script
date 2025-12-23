@@ -108,13 +108,17 @@ turn:
   tls_port: 3478
   udp_port: 3478
 
-# Simple LoadBalancer without certificate (HTTP only)
-loadBalancer:
-  type: alb
+# Service configuration for LoadBalancer (HTTP only)
+service:
+  type: LoadBalancer
   annotations:
     service.beta.kubernetes.io/aws-load-balancer-type: "external"
     service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
     service.beta.kubernetes.io/aws-load-balancer-target-type: "ip"
+
+# Disable ingress completely
+ingress:
+  enabled: false
 EOF
 
 echo "🚀 Deploying LiveKit (Phase 1 - HTTP only)..."
@@ -304,13 +308,20 @@ turn:
   tls_port: 3478
   udp_port: 3478
 
-# LoadBalancer with SSL certificate
-loadBalancer:
-  type: alb
-  tls:
-    - hosts:
-        - "$DOMAIN"
-      certificateArn: "$CERT_ARN"
+# Service configuration with SSL certificate
+service:
+  type: LoadBalancer
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    service.beta.kubernetes.io/aws-load-balancer-target-type: "ip"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: "$CERT_ARN"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "https"
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
+
+# Disable ingress completely
+ingress:
+  enabled: false
 EOF
 
 echo "🔒 Upgrading LiveKit with SSL certificate..."
