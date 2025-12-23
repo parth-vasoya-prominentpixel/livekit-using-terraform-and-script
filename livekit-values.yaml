@@ -1,0 +1,156 @@
+# LiveKit Helm Chart Values for digi-telephony.com
+# Production configuration with wildcard certificate support
+
+replicaCount: 2
+
+# LiveKit configuration
+livekit:
+  rtc:
+    use_external_ip: true
+  
+  # Redis configuration - UPDATE WITH YOUR REDIS ENDPOINT
+  redis:
+    address: <redis-host>:6379
+  
+  # API keys configuration - UPDATE WITH YOUR KEYS
+  keys:
+    <your-api-key>: <your-secret>
+  
+  # TURN server configuration
+  turn:
+    enabled: true
+    domain: turn-livekit-tf.digi-telephony.com
+    tls_port: 3478
+    # TLS secret for wildcard certificate
+    secretName: livekit-wildcard-tls
+
+# Load Balancer configuration for AWS ALB
+loadBalancer:
+  type: alb
+
+# Autoscaling configuration
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 60
+
+# Resource configuration
+# Resources are set assuming a 8 core instance
+resources:
+  limits:
+    cpu: 7500m
+    memory: 2048Mi
+  requests:
+    cpu: 7000m
+    memory: 1024Mi
+
+# Service configuration
+service:
+  type: ClusterIP
+  annotations:
+    # Use NLB for better performance with LiveKit
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+
+# Ingress configuration for ALB with wildcard certificate
+ingress:
+  enabled: true
+  className: alb
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    
+    # ⚠️ WILDCARD CERTIFICATE CONFIGURATION FOR *.digi-telephony.com ⚠️
+    # Option 1: Use ACM Certificate ARN (Recommended for production)
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:123456789012:certificate/12345678-1234-1234-1234-123456789012
+    
+    # Option 2: SSL Redirect (enable after configuring certificate)
+    # alb.ingress.kubernetes.io/ssl-redirect: '443'
+    
+    # Option 3: Custom SSL Policy
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS-1-2-2017-01
+    
+    # Health check configuration
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: '30'
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
+    alb.ingress.kubernetes.io/healthy-threshold-count: '2'
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: '3'
+    
+  hosts:
+    - host: livekit-tf.digi-telephony.com
+      paths:
+        - path: /
+          pathType: Prefix
+  
+  # TLS configuration (for wildcard certificate *.digi-telephony.com)
+  tls:
+    - secretName: livekit-wildcard-tls
+      hosts:
+        - livekit-tf.digi-telephony.com
+
+# Node selector (optional - use for specific node types)
+nodeSelector: {}
+
+# Tolerations (optional - use for tainted nodes)
+tolerations: []
+
+# Affinity (optional - use for pod placement)
+affinity: {}
+
+# Additional environment variables (optional)
+env: []
+
+# Additional volumes (optional)
+volumes: []
+
+# Additional volume mounts (optional)
+volumeMounts: []
+
+# Security context (optional)
+securityContext: {}
+
+# Pod security context (optional)
+podSecurityContext: {}
+
+# Image pull secrets (optional)
+imagePullSecrets: []
+
+# Service account (optional)
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# Pod annotations (optional)
+podAnnotations: {}
+
+# Pod labels (optional)
+podLabels: {}
+
+# ⚠️ IMPORTANT NOTES FOR WILDCARD CERTIFICATES ⚠️
+#
+# 1. ACM Certificate (Recommended):
+#    - Import your wildcard certificate to AWS Certificate Manager
+#    - Get the certificate ARN from ACM console
+#    - Add the ARN to alb.ingress.kubernetes.io/certificate-arn annotation
+#    - Enable SSL redirect: alb.ingress.kubernetes.io/ssl-redirect: '443'
+#
+# 2. Manual TLS Secret (Testing only):
+#    - Create secret: kubectl create secret tls livekit-tls-secret --cert=wildcard.crt --key=wildcard.key -n livekit
+#    - Uncomment secretName in turn and tls sections
+#    - This approach has limitations with ALB
+#
+# 3. cert-manager (Automated):
+#    - Install cert-manager in your cluster
+#    - Configure ACME provider (Let's Encrypt)
+#    - Add cert-manager annotations to ingress
+#    - Note: Wildcard certs require DNS-01 challenge
+#
+# 4. No TLS (Development only):
+#    - Remove/comment out all TLS configurations
+#    - Use HTTP only (not recommended for production)
+#
+# For production with wildcard certificates, ACM is the recommended approach.

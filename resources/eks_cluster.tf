@@ -4,7 +4,7 @@ module "eks_al2023" {
   version = "~> 21.0"
 
   name               = local.eks_name
-  kubernetes_version = "1.34"
+  kubernetes_version = "1.33"
 
   # VPC Configuration
   vpc_id     = module.vpc.vpc_id

@@ -1,4 +1,4 @@
-name: 🚀 LiveKit Pipeline (Auto)
+name: 🎥 LiveKit Deployment Pipeline
 
 on:
   workflow_dispatch:
@@ -32,11 +32,6 @@ on:
         type: boolean
       skip_terraform_apply:
         description: 'Skip Terraform Apply'
-        required: false
-        default: false
-        type: boolean
-      skip_load_balancer:
-        description: 'Skip Load Balancer Setup'
         required: false
         default: false
         type: boolean
@@ -192,13 +187,13 @@ jobs:
           echo "📊 Cluster: $CLUSTER_NAME"
           echo "📊 Redis: $REDIS_ENDPOINT"
 
-  # Step 4: Setup Load Balancer Controller (Optional)
-  setup-load-balancer:
-    name: ⚖️ Step 4 - Setup Load Balancer Controller
+  # Step 4: Complete LiveKit Deployment (Load Balancer + LiveKit)
+  deploy-livekit-complete:
+    name: 🎥 Step 4 - Complete LiveKit Deployment
     runs-on: ubuntu-latest
     needs: [terraform-apply]
-    if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_load_balancer && (needs.terraform-apply.result == 'success' || inputs.skip_terraform_apply) }}
-    environment: livekit-poc-${{ inputs.environment }}-setup-load-balancer
+    if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_livekit && (needs.terraform-apply.result == 'success' || inputs.skip_terraform_apply) }}
+    environment: livekit-poc-${{ inputs.environment }}-deploy-livekit
     
     steps:
       - name: Checkout code
@@ -208,7 +203,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          role-session-name: GitHubActions-Setup-LB-${{ github.run_id }}
+          role-session-name: GitHubActions-Deploy-LiveKit-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Tools
@@ -225,89 +220,54 @@ jobs:
           curl -sLO "https://github.com/eksctl-io/eksctl/releases/download/v0.191.0/eksctl_Linux_amd64.tar.gz"
           tar -xzf eksctl_Linux_amd64.tar.gz
           sudo mv eksctl /usr/local/bin/
-
-      - name: Get Cluster Name
-        id: cluster
-        run: |
-          if [ "${{ inputs.skip_terraform_apply }}" = "true" ]; then
-            # If terraform was skipped, get cluster name from environment
-            echo "cluster_name=lp-eks-livekit-use1-${{ inputs.environment }}" >> $GITHUB_OUTPUT
-          else
-            # Use output from terraform-apply
-            echo "cluster_name=${{ needs.terraform-apply.outputs.cluster-name }}" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Wait for Cluster Ready
-        run: |
-          echo "⏳ Waiting for cluster to be ready..."
-          CLUSTER_NAME="${{ steps.cluster.outputs.cluster_name }}"
           
-          # Reduced wait time
-          sleep 20
-          
-          # Check cluster status
-          for i in {1..5}; do
-            CLUSTER_STATUS=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "${{ env.AWS_REGION }}" --query 'cluster.status' --output text 2>/dev/null || echo "UNKNOWN")
-            echo "📋 Cluster status: $CLUSTER_STATUS (attempt $i/5)"
-            
-            if [ "$CLUSTER_STATUS" = "ACTIVE" ]; then
-              echo "✅ Cluster is ACTIVE and ready"
-              break
-            elif [ "$CLUSTER_STATUS" = "CREATING" ]; then
-              echo "⏳ Cluster still creating, waiting 20 seconds..."
-              sleep 20
-            else
-              echo "❌ Unexpected cluster status: $CLUSTER_STATUS"
-              if [ $i -eq 5 ]; then
-                echo "❌ Cluster not ready after 5 attempts"
-                exit 1
-              fi
-            fi
-          done
-
-      - name: Run Load Balancer Setup Script
-        working-directory: scripts
-        run: |
-          chmod +x 02-setup-load-balancer.sh
-          CLUSTER_NAME="${{ steps.cluster.outputs.cluster_name }}" \
-          AWS_REGION="${{ env.AWS_REGION }}" \
-          ./02-setup-load-balancer.sh
-
-  # Step 5: Deploy LiveKit (Optional)
-  deploy-livekit:
-    name: 🎥 Step 5 - Deploy LiveKit
-    runs-on: ubuntu-latest
-    needs: [terraform-apply, setup-load-balancer]
-    if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_livekit && (needs.setup-load-balancer.result == 'success' || inputs.skip_load_balancer) }}
-    environment: livekit-poc-${{ inputs.environment }}-deploy-livekit
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          role-session-name: GitHubActions-Deploy-LiveKit-${{ github.run_id }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Setup Tools
-        run: |
-          curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl"
-          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-          curl -fsSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz | tar -xz
-          sudo mv linux-amd64/helm /usr/local/bin/
+          # Install jq and curl
+          sudo apt-get update && sudo apt-get install -y jq curl wget
           
           # Install Terraform for Redis endpoint retrieval if needed
           wget -q https://releases.hashicorp.com/terraform/1.10.3/terraform_1.10.3_linux_amd64.zip
           unzip -q terraform_1.10.3_linux_amd64.zip
           sudo mv terraform /usr/local/bin/
 
-      - name: Run LiveKit Deployment Script
+      - name: Wait for Cluster Ready
+        run: |
+          # Determine cluster name
+          if [ "${{ inputs.skip_terraform_apply }}" = "true" ]; then
+            CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
+          else
+            CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
+          fi
+          
+          echo "⏳ Waiting for cluster to be ready..."
+          echo "📋 Cluster: $CLUSTER_NAME"
+          
+          # Wait for cluster to stabilize
+          sleep 30
+          
+          # Check cluster status
+          for i in {1..10}; do
+            CLUSTER_STATUS=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "${{ env.AWS_REGION }}" --query 'cluster.status' --output text 2>/dev/null || echo "UNKNOWN")
+            echo "📋 Cluster status: $CLUSTER_STATUS (attempt $i/10)"
+            
+            if [ "$CLUSTER_STATUS" = "ACTIVE" ]; then
+              echo "✅ Cluster is ACTIVE and ready"
+              break
+            elif [ "$CLUSTER_STATUS" = "CREATING" ]; then
+              echo "⏳ Cluster still creating, waiting 30 seconds..."
+              sleep 30
+            else
+              echo "❌ Unexpected cluster status: $CLUSTER_STATUS"
+              if [ $i -eq 10 ]; then
+                echo "❌ Cluster not ready after 10 attempts"
+                exit 1
+              fi
+            fi
+          done
+
+      - name: Run Complete LiveKit Deployment
         working-directory: scripts
         run: |
-          chmod +x 03-deploy-livekit.sh
+          chmod +x 02-deploy-livekit-complete.sh
           
           # Determine cluster name and Redis endpoint
           if [ "${{ inputs.skip_terraform_apply }}" = "true" ]; then
@@ -328,42 +288,21 @@ jobs:
             REDIS_ENDPOINT="${{ needs.terraform-apply.outputs.redis-endpoint }}"
           fi
           
-          # Create environment configuration for the script
-          cat > ../livekit.env << EOF
-          # Pipeline Configuration - Auto-generated
-          AWS_REGION=${{ env.AWS_REGION }}
-          CLUSTER_NAME=$CLUSTER_NAME
-          
-          # LiveKit API Credentials
-          API_KEY=APIKmrHi78hxpbd
-          SECRET_KEY=Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB
-          
-          # Kubernetes Configuration
-          NAMESPACE=livekit
-          RELEASE_NAME=livekit
-          
-          # Autoscaling Configuration
-          MIN_REPLICAS=1
-          MAX_REPLICAS=20
-          CPU_THRESHOLD=75
-          
-          # Resource Configuration
-          CPU_REQUEST=500m
-          CPU_LIMIT=2000m
-          MEMORY_REQUEST=1Gi
-          MEMORY_LIMIT=2Gi
-          
-          # LoadBalancer Configuration
-          LB_TIMEOUT=600
-          HEALTH_CHECK_TIMEOUT=300
-          EOF
-          
-          echo "📋 Configuration created for environment: ${{ inputs.environment }}"
+          echo "📋 Configuration for Complete LiveKit Deployment:"
           echo "📋 Cluster: $CLUSTER_NAME"
           echo "📋 Redis: $REDIS_ENDPOINT"
+          echo "📋 Environment: ${{ inputs.environment }}"
+          echo "📋 Domain: livekit-tf.digi-telephony.com"
+          echo ""
           
-          # Run the deployment script
-          ./03-deploy-livekit.sh
+          # Run the comprehensive deployment script with automatic certificate setup
+          CLUSTER_NAME="$CLUSTER_NAME" \
+          AWS_REGION="${{ env.AWS_REGION }}" \
+          REDIS_ENDPOINT="$REDIS_ENDPOINT" \
+          ENVIRONMENT="${{ inputs.environment }}" \
+          API_KEY="APIKmrHi78hxpbd" \
+          SECRET_KEY="Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB" \
+          ./02-deploy-livekit-complete.sh
 
   # DESTROY: Remove everything (Optional)
   destroy:
