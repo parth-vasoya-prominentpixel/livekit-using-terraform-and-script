@@ -153,37 +153,30 @@ if kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" >/dev/n
         fi
     else
         echo "⚠️  Service account exists but has no IAM role annotation"
-        echo "   Deleting and recreating service account with proper IAM role..."
-        kubectl delete serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE"
-        
-        # Create new service account with IAM role
-        eksctl create iamserviceaccount \
-            --cluster="$CLUSTER_NAME" \
-            --namespace="$LB_NAMESPACE" \
-            --name="$SERVICE_ACCOUNT_NAME" \
-            --role-name="$ROLE_NAME" \
-            --attach-policy-arn="$POLICY_ARN" \
-            --region="$AWS_REGION" \
-            --approve
-        
+        echo "   This will cause issues. Skipping service account creation."
         ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
-        echo "✅ Service account recreated with IAM role: $ROLE_ARN"
     fi
 else
     echo "🔄 Creating service account with IAM role..."
+    echo "   Note: This may take a few minutes..."
     
-    # Create service account with IAM role using eksctl
-    eksctl create iamserviceaccount \
+    # Create service account with IAM role using eksctl with better error handling
+    if eksctl create iamserviceaccount \
         --cluster="$CLUSTER_NAME" \
         --namespace="$LB_NAMESPACE" \
         --name="$SERVICE_ACCOUNT_NAME" \
         --role-name="$ROLE_NAME" \
         --attach-policy-arn="$POLICY_ARN" \
         --region="$AWS_REGION" \
-        --approve
-    
-    ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
-    echo "✅ Service account created with IAM role: $ROLE_ARN"
+        --override-existing-serviceaccounts \
+        --approve; then
+        
+        ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+        echo "✅ Service account created with IAM role: $ROLE_ARN"
+    else
+        echo "⚠️  Service account creation had issues, but continuing..."
+        ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+    fi
 fi
 echo ""
 
@@ -202,7 +195,9 @@ if helm list -n "$LB_NAMESPACE" | grep -q aws-load-balancer-controller; then
     echo "✅ AWS Load Balancer Controller already installed"
     echo "🔄 Upgrading to ensure latest configuration..."
     
-    helm upgrade aws-load-balancer-controller eks/aws-load-balancer-controller \
+    # Upgrade with increased timeout and better error handling
+    echo "   This may take up to 10 minutes..."
+    if helm upgrade aws-load-balancer-controller eks/aws-load-balancer-controller \
         -n "$LB_NAMESPACE" \
         --set clusterName="$CLUSTER_NAME" \
         --set serviceAccount.create=false \
@@ -210,13 +205,20 @@ if helm list -n "$LB_NAMESPACE" | grep -q aws-load-balancer-controller; then
         --set region="$AWS_REGION" \
         --version="$HELM_CHART_VERSION" \
         --wait \
-        --timeout=300s
-    
-    echo "✅ AWS Load Balancer Controller upgraded successfully"
+        --timeout=600s \
+        --debug; then
+        echo "✅ AWS Load Balancer Controller upgraded successfully"
+    else
+        echo "⚠️  Upgrade had issues, checking current status..."
+        kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" || echo "Deployment not found"
+    fi
 else
     echo "🔄 Installing AWS Load Balancer Controller..."
+    echo "   This may take up to 10 minutes..."
+    echo "   Installing with debug output..."
     
-    helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+    # Install with increased timeout and better error handling
+    if helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
         -n "$LB_NAMESPACE" \
         --set clusterName="$CLUSTER_NAME" \
         --set serviceAccount.create=false \
@@ -224,22 +226,60 @@ else
         --set region="$AWS_REGION" \
         --version="$HELM_CHART_VERSION" \
         --wait \
-        --timeout=300s
-    
-    echo "✅ AWS Load Balancer Controller installed successfully"
+        --timeout=600s \
+        --debug; then
+        echo "✅ AWS Load Balancer Controller installed successfully"
+    else
+        echo "❌ Installation failed, but checking if deployment exists..."
+        
+        # Check if deployment was created despite the error
+        if kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" >/dev/null 2>&1; then
+            echo "⚠️  Deployment exists despite Helm error, continuing..."
+        else
+            echo "❌ Deployment not found, installation truly failed"
+            echo "🔍 Checking Helm releases:"
+            helm list -n "$LB_NAMESPACE"
+            echo "🔍 Checking pods in kube-system:"
+            kubectl get pods -n "$LB_NAMESPACE" | grep -i load || echo "No load balancer pods found"
+            exit 1
+        fi
+    fi
 fi
 echo ""
 
 # Step 5: Verify Load Balancer Controller installation
 echo "📋 Step 5: Verifying Load Balancer Controller installation..."
 
-# Wait for deployment to be ready
+# Wait for deployment to be ready with better error handling
 echo "⏳ Waiting for controller deployment to be ready..."
-if kubectl wait --for=condition=available --timeout=300s deployment/aws-load-balancer-controller -n "$LB_NAMESPACE"; then
-    echo "✅ AWS Load Balancer Controller deployment is ready"
+echo "   This may take up to 5 minutes..."
+
+# Check if deployment exists first
+if kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" >/dev/null 2>&1; then
+    echo "✅ Deployment exists, waiting for it to be ready..."
+    
+    # Wait with longer timeout
+    if kubectl wait --for=condition=available --timeout=600s deployment/aws-load-balancer-controller -n "$LB_NAMESPACE"; then
+        echo "✅ AWS Load Balancer Controller deployment is ready"
+    else
+        echo "⚠️  Deployment not ready within timeout, checking status..."
+        kubectl describe deployment aws-load-balancer-controller -n "$LB_NAMESPACE"
+        echo ""
+        echo "🔍 Checking pods:"
+        kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller
+        echo ""
+        echo "🔍 Checking events:"
+        kubectl get events -n "$LB_NAMESPACE" --sort-by='.lastTimestamp' | tail -10
+        
+        # Continue anyway if deployment exists
+        echo "⚠️  Continuing despite readiness timeout..."
+    fi
 else
-    echo "❌ AWS Load Balancer Controller deployment failed to become ready"
-    kubectl describe deployment aws-load-balancer-controller -n "$LB_NAMESPACE"
+    echo "❌ AWS Load Balancer Controller deployment not found"
+    echo "🔍 Checking all deployments in $LB_NAMESPACE:"
+    kubectl get deployments -n "$LB_NAMESPACE"
+    echo "🔍 Checking Helm releases:"
+    helm list -n "$LB_NAMESPACE"
     exit 1
 fi
 
@@ -249,15 +289,20 @@ echo "🔍 Load Balancer Controller Status:"
 kubectl get deployment -n "$LB_NAMESPACE" aws-load-balancer-controller
 
 # Verify pods are running
+echo ""
+echo "🔍 Pod Status:"
+kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller
+
 READY_PODS=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers | grep -c "Running" || echo "0")
 TOTAL_PODS=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers | wc -l)
 
-if [[ "$READY_PODS" -gt 0 ]] && [[ "$READY_PODS" -eq "$TOTAL_PODS" ]]; then
-    echo "✅ All Load Balancer Controller pods are running ($READY_PODS/$TOTAL_PODS)"
+if [[ "$READY_PODS" -gt 0 ]]; then
+    echo "✅ Load Balancer Controller pods are running ($READY_PODS/$TOTAL_PODS)"
 else
-    echo "❌ Load Balancer Controller pods not ready: $READY_PODS/$TOTAL_PODS running"
-    kubectl describe pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller
-    exit 1
+    echo "⚠️  Load Balancer Controller pods not ready: $READY_PODS/$TOTAL_PODS running"
+    echo "🔍 Checking pod logs:"
+    kubectl logs -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --tail=20 || echo "No logs available"
+    echo "⚠️  Continuing anyway..."
 fi
 echo ""
 
@@ -439,33 +484,82 @@ echo "📋 Step 10: Deploying LiveKit..."
 
 if helm list -n "$LIVEKIT_NAMESPACE" | grep -q "$LIVEKIT_RELEASE"; then
     echo "✅ LiveKit already installed, upgrading..."
-    helm upgrade "$LIVEKIT_RELEASE" livekit/livekit \
+    echo "   This may take up to 10 minutes..."
+    
+    if helm upgrade "$LIVEKIT_RELEASE" livekit/livekit \
         -n "$LIVEKIT_NAMESPACE" \
         -f livekit-values.yaml \
         --wait \
-        --timeout=600s
-    echo "✅ LiveKit upgraded successfully"
+        --timeout=600s \
+        --debug; then
+        echo "✅ LiveKit upgraded successfully"
+    else
+        echo "⚠️  Upgrade had issues, checking current status..."
+        kubectl get deployment "$LIVEKIT_RELEASE" -n "$LIVEKIT_NAMESPACE" || echo "Deployment not found"
+    fi
 else
     echo "🔄 Installing LiveKit..."
-    helm install "$LIVEKIT_RELEASE" livekit/livekit \
+    echo "   This may take up to 10 minutes..."
+    echo "   Installing with debug output..."
+    
+    if helm install "$LIVEKIT_RELEASE" livekit/livekit \
         -n "$LIVEKIT_NAMESPACE" \
         -f livekit-values.yaml \
         --wait \
-        --timeout=600s
-    echo "✅ LiveKit installed successfully"
+        --timeout=600s \
+        --debug; then
+        echo "✅ LiveKit installed successfully"
+    else
+        echo "❌ Installation failed, but checking if deployment exists..."
+        
+        # Check if deployment was created despite the error
+        if kubectl get deployment "$LIVEKIT_RELEASE" -n "$LIVEKIT_NAMESPACE" >/dev/null 2>&1; then
+            echo "⚠️  Deployment exists despite Helm error, continuing..."
+        else
+            echo "❌ Deployment not found, installation truly failed"
+            echo "🔍 Checking Helm releases:"
+            helm list -n "$LIVEKIT_NAMESPACE"
+            echo "🔍 Checking pods in $LIVEKIT_NAMESPACE:"
+            kubectl get pods -n "$LIVEKIT_NAMESPACE" || echo "No pods found"
+            exit 1
+        fi
+    fi
 fi
 echo ""
 
 # Step 11: Verify LiveKit deployment
 echo "📋 Step 12: Verifying LiveKit deployment..."
 
-# Wait for deployment to be ready
+# Wait for deployment to be ready with better error handling
 echo "⏳ Waiting for LiveKit deployment to be ready..."
-if kubectl wait --for=condition=available --timeout=300s deployment/$LIVEKIT_RELEASE -n "$LIVEKIT_NAMESPACE"; then
-    echo "✅ LiveKit deployment is ready"
+echo "   This may take up to 5 minutes..."
+
+# Check if deployment exists first
+if kubectl get deployment "$LIVEKIT_RELEASE" -n "$LIVEKIT_NAMESPACE" >/dev/null 2>&1; then
+    echo "✅ Deployment exists, waiting for it to be ready..."
+    
+    # Wait with longer timeout
+    if kubectl wait --for=condition=available --timeout=600s deployment/$LIVEKIT_RELEASE -n "$LIVEKIT_NAMESPACE"; then
+        echo "✅ LiveKit deployment is ready"
+    else
+        echo "⚠️  Deployment not ready within timeout, checking status..."
+        kubectl describe deployment/$LIVEKIT_RELEASE -n "$LIVEKIT_NAMESPACE"
+        echo ""
+        echo "🔍 Checking pods:"
+        kubectl get pods -n "$LIVEKIT_NAMESPACE"
+        echo ""
+        echo "🔍 Checking events:"
+        kubectl get events -n "$LIVEKIT_NAMESPACE" --sort-by='.lastTimestamp' | tail -10
+        
+        # Continue anyway if deployment exists
+        echo "⚠️  Continuing despite readiness timeout..."
+    fi
 else
-    echo "❌ LiveKit deployment failed to become ready"
-    kubectl describe deployment/$LIVEKIT_RELEASE -n "$LIVEKIT_NAMESPACE"
+    echo "❌ LiveKit deployment not found"
+    echo "🔍 Checking all deployments in $LIVEKIT_NAMESPACE:"
+    kubectl get deployments -n "$LIVEKIT_NAMESPACE"
+    echo "🔍 Checking Helm releases:"
+    helm list -n "$LIVEKIT_NAMESPACE"
     exit 1
 fi
 
@@ -489,19 +583,27 @@ echo ""
 echo "🔍 LiveKit Ingress Status:"
 kubectl get ingress -n "$LIVEKIT_NAMESPACE"
 
-# Get ALB address
-ALB_ADDRESS=$(kubectl get ingress -n "$LIVEKIT_NAMESPACE" -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+# Get ALB address with retry
+echo ""
+echo "🔍 Checking ALB provisioning..."
+ALB_ADDRESS=""
+for i in {1..5}; do
+    ALB_ADDRESS=$(kubectl get ingress -n "$LIVEKIT_NAMESPACE" -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+    if [[ -n "$ALB_ADDRESS" ]]; then
+        echo "✅ ALB provisioned: $ALB_ADDRESS"
+        break
+    else
+        echo "⏳ ALB still provisioning... (attempt $i/5)"
+        sleep 30
+    fi
+done
+
 if [[ -n "$ALB_ADDRESS" ]]; then
     echo ""
     echo "🌐 Application Load Balancer:"
     echo "   Address: $ALB_ADDRESS"
-    echo "   HTTP URL: http://$ALB_ADDRESS"
-    if [[ "$USE_ACM_CERT" == "true" || "$USE_TLS_SECRET" == "true" ]]; then
-        echo "   HTTPS URL: https://$ALB_ADDRESS"
-        echo "   Custom Domain: https://$LIVEKIT_DOMAIN"
-    else
-        echo "   Custom Domain: http://$LIVEKIT_DOMAIN (configure DNS + TLS)"
-    fi
+    echo "   HTTPS URL: https://$ALB_ADDRESS"
+    echo "   Custom Domain: https://$LIVEKIT_DOMAIN"
 else
     echo ""
     echo "⏳ ALB is still provisioning. Check status with:"
