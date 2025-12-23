@@ -101,11 +101,11 @@ helm repo add livekit https://helm.livekit.io >/dev/null 2>&1 || true
 helm repo update >/dev/null 2>&1
 echo "✅ LiveKit Helm repository ready"
 
-# Create simple values.yaml following official docs
+# Create proper values.yaml for Service LoadBalancer (not Ingress)
 echo ""
 echo "🔧 Creating LiveKit values.yaml..."
 cat > /tmp/livekit-values.yaml << EOF
-# LiveKit Configuration - Following Official Documentation
+# LiveKit Configuration - Service LoadBalancer (No Ingress)
 # Refer to https://docs.livekit.io/deploy/kubernetes/
 
 replicaCount: 2
@@ -122,11 +122,19 @@ turn:
   enabled: true
   tls_port: 3478
 
-loadBalancer:
-  type: alb
+# Use Service LoadBalancer instead of Ingress
+service:
+  type: LoadBalancer
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
 
-# Disable ingress to avoid conflicts
+# Explicitly disable ingress
 ingress:
+  enabled: false
+
+# Disable loadBalancer section (this creates Ingress)
+loadBalancer:
   enabled: false
 
 autoscaling:
@@ -167,15 +175,19 @@ if helm status "$RELEASE_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
         echo "🗑️ Cleaning up failed deployment..."
     fi
     
-    # Force cleanup
+    # Force cleanup - remove everything
+    echo "🗑️ Performing comprehensive cleanup..."
     helm uninstall "$RELEASE_NAME" -n "$NAMESPACE" --wait || true
     
-    # Clean up any remaining resources
-    kubectl delete ingress -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server --ignore-not-found=true || true
+    # Clean up all possible resources
+    kubectl delete ingress -n "$NAMESPACE" --all --ignore-not-found=true || true
+    kubectl delete svc -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server --ignore-not-found=true || true
     kubectl delete pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server --force --grace-period=0 --ignore-not-found=true || true
+    kubectl delete hpa -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server --ignore-not-found=true || true
+    kubectl delete deployment -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server --ignore-not-found=true || true
     
     echo "⏳ Waiting for cleanup to complete..."
-    sleep 10
+    sleep 15
     echo "✅ Cleanup completed - will install fresh"
     
     HELM_ACTION="install"
