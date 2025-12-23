@@ -101,12 +101,14 @@ helm repo add livekit https://helm.livekit.io >/dev/null 2>&1 || true
 helm repo update >/dev/null 2>&1
 echo "✅ LiveKit Helm repository ready"
 
-# Create proper values.yaml for Service LoadBalancer (not Ingress)
+# Create proper values.yaml for ALB with Ingress (matching manual setup)
 echo ""
 echo "🔧 Creating LiveKit values.yaml..."
 cat > /tmp/livekit-values.yaml << EOF
+# LiveKit Configuration - ALB with Ingress (matching manual setup)
+replicaCount: 2
+
 livekit:
-  domain: livekit-eks-tf.digi-telephony.com
   rtc:
     use_external_ip: true
     port_range_start: 50000
@@ -115,41 +117,29 @@ livekit:
     address: $REDIS_ENDPOINT
   keys:
     $API_KEY: $SECRET_KEY
-  metrics:
-    enabled: true
-    prometheus:
-      enabled: true
-      port: 6789
-  resources:
-    requests:
-      cpu: 500m
-      memory: 512Mi
-    limits:
-      cpu: 2000m
-      memory: 2Gi
-  affinity:
-    podAntiAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        - labelSelector:
-            matchExpressions:
-              - key: app
-                operator: In
-                values:
-                  - livekit-livekit-server
-          topologyKey: "kubernetes.io/hostname"
 
 turn:
   enabled: true
-  domain: turn.livekit-eks-tf.digi-telephony.com
   tls_port: 3478
-  udp_port: 3478
 
+# ALB LoadBalancer configuration (creates Ingress like manual setup)
 loadBalancer:
   type: alb
-  tls:
-    - hosts:
-        - livekit-eks-tf.digi-telephony.com
-      certificateArn: arn:aws:acm:us-east-1:918595516608:certificate/316b1ef2-b08f-4294-b8ef-5bb080238a0b
+  # No TLS for now - HTTP only like you requested
+
+autoscaling:
+  enabled: true
+  minReplicas: $MIN_REPLICAS
+  maxReplicas: $MAX_REPLICAS
+  targetCPUUtilizationPercentage: $CPU_THRESHOLD
+
+resources:
+  limits:
+    cpu: $CPU_LIMIT
+    memory: $MEMORY_LIMIT
+  requests:
+    cpu: $CPU_REQUEST
+    memory: $MEMORY_REQUEST
 EOF
 
 echo "✅ LiveKit values.yaml created"
@@ -205,19 +195,20 @@ helm install "$RELEASE_NAME" livekit/livekit-server \
 
 echo "✅ LiveKit installed successfully!"
 
-# Wait for LoadBalancer
+# Wait for ALB Ingress endpoint
 echo ""
-echo "⏳ Waiting for LoadBalancer endpoint..."
-LB_ENDPOINT=""
+echo "⏳ Waiting for ALB Ingress endpoint..."
+ALB_ENDPOINT=""
 for i in {1..40}; do
-    LB_ENDPOINT=$(kubectl get svc -n "$NAMESPACE" "$RELEASE_NAME" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+    # Check for Ingress endpoint (ALB creates Ingress, not Service LoadBalancer)
+    ALB_ENDPOINT=$(kubectl get ingress -n "$NAMESPACE" -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
     
-    if [ -n "$LB_ENDPOINT" ] && [ "$LB_ENDPOINT" != "null" ]; then
-        echo "✅ LoadBalancer endpoint ready: $LB_ENDPOINT"
+    if [ -n "$ALB_ENDPOINT" ] && [ "$ALB_ENDPOINT" != "null" ]; then
+        echo "✅ ALB Ingress endpoint ready: $ALB_ENDPOINT"
         break
     fi
     
-    echo "   Attempt $i/40: LoadBalancer provisioning..."
+    echo "   Attempt $i/40: ALB Ingress provisioning..."
     sleep 15
 done
 
@@ -228,18 +219,21 @@ kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server
 echo ""
 kubectl get svc -n "$NAMESPACE"
 echo ""
+kubectl get ingress -n "$NAMESPACE"
+echo ""
 
 # Final summary
 echo "🎉 LiveKit Deployment Complete!"
 echo "==============================="
 echo ""
 echo "📋 Connection Details:"
-if [ -n "$LB_ENDPOINT" ] && [ "$LB_ENDPOINT" != "null" ]; then
-    echo "   ✅ WebSocket URL: ws://$LB_ENDPOINT"
-    echo "   ✅ HTTP URL: http://$LB_ENDPOINT"
+if [ -n "$ALB_ENDPOINT" ] && [ "$ALB_ENDPOINT" != "null" ]; then
+    echo "   ✅ WebSocket URL: ws://$ALB_ENDPOINT"
+    echo "   ✅ HTTP URL: http://$ALB_ENDPOINT"
+    echo "   ✅ ALB Ingress: $ALB_ENDPOINT"
 else
-    echo "   ⏳ LoadBalancer: Still provisioning"
-    echo "   💡 Check: kubectl get svc -n $NAMESPACE $RELEASE_NAME"
+    echo "   ⏳ ALB Ingress: Still provisioning"
+    echo "   💡 Check: kubectl get ingress -n $NAMESPACE"
 fi
 echo ""
 echo "🔑 API Credentials:"
