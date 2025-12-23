@@ -105,51 +105,51 @@ echo "✅ LiveKit Helm repository ready"
 echo ""
 echo "🔧 Creating LiveKit values.yaml..."
 cat > /tmp/livekit-values.yaml << EOF
-# LiveKit Configuration - Service LoadBalancer (No Ingress)
-# Refer to https://docs.livekit.io/deploy/kubernetes/
-
-replicaCount: 2
-
 livekit:
+  domain: livekit-eks-tf.digi-telephony.com
   rtc:
     use_external_ip: true
+    port_range_start: 50000
+    port_range_end: 60000
   redis:
     address: $REDIS_ENDPOINT
   keys:
     $API_KEY: $SECRET_KEY
+  metrics:
+    enabled: true
+    prometheus:
+      enabled: true
+      port: 6789
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - livekit-livekit-server
+          topologyKey: "kubernetes.io/hostname"
 
 turn:
   enabled: true
+  domain: turn.livekit-eks-tf.digi-telephony.com
   tls_port: 3478
+  udp_port: 3478
 
-# Use Service LoadBalancer instead of Ingress
-service:
-  type: LoadBalancer
-  annotations:
-    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
-    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
-
-# Explicitly disable ingress
-ingress:
-  enabled: false
-
-# Disable loadBalancer section (this creates Ingress)
 loadBalancer:
-  enabled: false
-
-autoscaling:
-  enabled: true
-  minReplicas: $MIN_REPLICAS
-  maxReplicas: $MAX_REPLICAS
-  targetCPUUtilizationPercentage: $CPU_THRESHOLD
-
-resources:
-  limits:
-    cpu: $CPU_LIMIT
-    memory: $MEMORY_LIMIT
-  requests:
-    cpu: $CPU_REQUEST
-    memory: $MEMORY_REQUEST
+  type: alb
+  tls:
+    - hosts:
+        - livekit-eks-tf.digi-telephony.com
+      certificateArn: arn:aws:acm:us-east-1:918595516608:certificate/316b1ef2-b08f-4294-b8ef-5bb080238a0b
 EOF
 
 echo "✅ LiveKit values.yaml created"
