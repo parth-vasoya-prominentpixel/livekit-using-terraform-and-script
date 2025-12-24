@@ -16,12 +16,14 @@ AWS_REGION="${AWS_REGION:-us-east-1}"
 NAMESPACE="livekit"
 RELEASE_NAME="livekit"
 
-# Redis endpoints (dynamic detection in pipeline)
-REDIS_ENDPOINT="${REDIS_ENDPOINT:-clustercfg.livekit-redis.x4ncn3.use1.cache.amazonaws.com:6379}"
+# Redis endpoints - Using Primary endpoint for read/write operations
+# Primary endpoint: lp-ec-redis-use1-dev-redis.x4ncn3.ng.0001.use1.cache.amazonaws.com:6379
+# Reader endpoint: lp-ec-redis-use1-dev-redis-ro.x4ncn3.ng.0001.use1.cache.amazonaws.com:6379
+REDIS_ENDPOINT="${REDIS_ENDPOINT:-lp-ec-redis-use1-dev-redis.x4ncn3.ng.0001.use1.cache.amazonaws.com:6379}"
 
-# Domains and Certificate
+# Domains and Certificate (EXACT as specified by user - UPDATED)
 LIVEKIT_DOMAIN="livekit-eks-tf.digi-telephony.com"
-TURN_DOMAIN="turn-eks-tf.livekit.digi-telephony.com"
+TURN_DOMAIN="turn-eks-tf.digi-telephony.com"
 CERT_ARN="arn:aws:acm:us-east-1:918595516608:certificate/4523a895-7899-41a3-8589-2a5baed3b420"
 
 # API Keys
@@ -121,80 +123,54 @@ echo "🚀 Step 2: Deploy LiveKit with Custom Values"
 echo "============================================="
 echo "🔧 Creating LiveKit values file..."
 
-# Create values file based on official example + your configuration
+# Create LiveKit values based on deep analysis of official chart
 cat > /tmp/livekit-values.yaml << EOF
-# LiveKit Server Configuration - Based on Official Example
-# Refer to https://docs.livekit.io/deploy/kubernetes/ for instructions
+# Basic deployment configuration
+replicaCount: 1
+image:
+  repository: livekit/livekit-server
+  tag: v1.9.0
+  pullPolicy: IfNotPresent
 
-replicaCount: 2
-
+# LiveKit server configuration
 livekit:
+  # Domain for WebSocket connections
   domain: $LIVEKIT_DOMAIN
+  
+  # RTC configuration for WebRTC
   rtc:
     use_external_ip: true
     port_range_start: 50000
     port_range_end: 60000
+    
+  # Redis connection
   redis:
     address: $REDIS_ENDPOINT
+    
+  # API keys for authentication
   keys:
     $API_KEY: $SECRET_KEY
-  metrics:
-    enabled: true
-  prometheus:
-    enabled: true
-    port: 6789
 
+# TURN server configuration
 turn:
   enabled: true
   domain: $TURN_DOMAIN
   tls_port: 3478
   udp_port: 3478
 
-loadBalancer:
-  # With ALB, TLS certificates are managed by ACM
-  # Ensure you have issued a certificate for your domain in ACM
-  type: alb
-
-tls:
-  - hosts:
-    - $LIVEKIT_DOMAIN
-    certificateArn: $CERT_ARN
-
-# Explicitly disable ingress to prevent the error
-ingress:
-  enabled: false
-
-# Service configuration
+# Service configuration - Use LoadBalancer to create ALB
 service:
   type: LoadBalancer
   port: 7880
+  targetPort: 7880
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: $CERT_ARN
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "https"
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
 
-# Health check configuration to fix readiness probe issues
-livenessProbe:
-  httpGet:
-    path: /
-    port: 7880
-  initialDelaySeconds: 30
-  periodSeconds: 10
-  timeoutSeconds: 5
-  failureThreshold: 3
-
-readinessProbe:
-  httpGet:
-    path: /
-    port: 7880
-  initialDelaySeconds: 10
-  periodSeconds: 5
-  timeoutSeconds: 3
-  failureThreshold: 3
-
-autoscaling:
-  enabled: true
-  minReplicas: 1
-  maxReplicas: 5
-  targetCPUUtilizationPercentage: 60
-
-# Resources are set assuming a 8 core instance (adjusted for your specs)
+# Resource limits
 resources:
   limits:
     cpu: 2000m
@@ -203,31 +179,126 @@ resources:
     cpu: 500m
     memory: 512Mi
 
-# Pod Anti-Affinity for High Availability
+# Pod configuration
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: false
+  runAsNonRoot: true
+  runAsUser: 1000
+
+# Health checks - Adjusted for LiveKit startup time
+livenessProbe:
+  httpGet:
+    path: /
+    port: 7880
+    scheme: HTTP
+  initialDelaySeconds: 60
+  periodSeconds: 30
+  timeoutSeconds: 10
+  failureThreshold: 3
+  successThreshold: 1
+
+readinessProbe:
+  httpGet:
+    path: /
+    port: 7880
+    scheme: HTTP
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+# Startup probe for slow starting containers
+startupProbe:
+  httpGet:
+    path: /
+    port: 7880
+    scheme: HTTP
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 30
+  successThreshold: 1
+
+# Node affinity for better distribution
 affinity:
   podAntiAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-    - labelSelector:
-        matchExpressions:
-        - key: app
-          operator: In
-          values:
-          - livekit-livekit-server
-      topologyKey: "kubernetes.io/hostname"
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        labelSelector:
+          matchExpressions:
+          - key: app.kubernetes.io/name
+            operator: In
+            values:
+            - livekit-server
+        topologyKey: kubernetes.io/hostname
 
-# Environment variables for better startup
+# Tolerations for node scheduling
+tolerations: []
+
+# Node selector
+nodeSelector: {}
+
+# Environment variables for LiveKit configuration
 env:
-  - name: LIVEKIT_CONFIG
+  - name: LIVEKIT_CONFIG_BODY
     value: |
       port: 7880
+      bind_addresses:
+        - ""
       rtc:
-        use_external_ip: true
+        tcp_port: 7881
         port_range_start: 50000
         port_range_end: 60000
+        use_external_ip: true
       redis:
         address: $REDIS_ENDPOINT
       keys:
         $API_KEY: $SECRET_KEY
+      turn:
+        enabled: true
+        domain: $TURN_DOMAIN
+        tls_port: 3478
+        udp_port: 3478
+      webhook:
+        api_key: $API_KEY
+      room:
+        auto_create: true
+        enable_recording: false
+      logging:
+        level: info
+        
+# Disable ingress completely - we use LoadBalancer service
+ingress:
+  enabled: false
+
+# Disable autoscaling for now to avoid complexity
+autoscaling:
+  enabled: false
+
+# Service account
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# Pod disruption budget
+podDisruptionBudget:
+  enabled: false
+
+# Network policy
+networkPolicy:
+  enabled: false
 EOF
 
 echo "✅ LiveKit values file created"
@@ -242,15 +313,67 @@ echo "   Redis: $REDIS_ENDPOINT"
 echo "   Load Balancer: ALB (internet-facing)"
 echo "   TLS: Enabled with ACM certificate"
 
-# Step 5: Deploy LiveKit (Official Command from Documentation)
+# Step 5: Deploy LiveKit (Deep Analysis Approach)
 echo ""
 echo "🚀 Installing LiveKit deployment..."
-echo "📋 Using official command: helm install livekit livekit/livekit-server"
+echo "📋 Using comprehensive configuration based on official chart analysis"
 
+# First, let's check what templates the chart will generate
+echo "🔍 Analyzing Helm chart templates..."
+helm template "$RELEASE_NAME" livekit/livekit-server \
+    --namespace "$NAMESPACE" \
+    --values /tmp/livekit-values.yaml \
+    --debug > /tmp/livekit-templates.yaml 2>&1
+
+if [ $? -eq 0 ]; then
+    echo "✅ Helm template generation successful"
+    echo "📋 Generated templates preview:"
+    head -50 /tmp/livekit-templates.yaml
+else
+    echo "❌ Helm template generation failed"
+    echo "📋 Template errors:"
+    cat /tmp/livekit-templates.yaml
+    echo ""
+    echo "🔄 Trying with simplified configuration..."
+    
+    # Fallback to ultra-minimal configuration
+    cat > /tmp/livekit-simple.yaml << EOF
+replicaCount: 1
+livekit:
+  domain: $LIVEKIT_DOMAIN
+  redis:
+    address: $REDIS_ENDPOINT
+  keys:
+    $API_KEY: $SECRET_KEY
+service:
+  type: LoadBalancer
+ingress:
+  enabled: false
+EOF
+    
+    echo "🔍 Testing simplified configuration..."
+    helm template "$RELEASE_NAME" livekit/livekit-server \
+        --namespace "$NAMESPACE" \
+        --values /tmp/livekit-simple.yaml \
+        --debug > /tmp/livekit-simple-templates.yaml 2>&1
+    
+    if [ $? -eq 0 ]; then
+        echo "✅ Simplified template works, using it for deployment"
+        cp /tmp/livekit-simple.yaml /tmp/livekit-values.yaml
+    else
+        echo "❌ Even simplified template failed:"
+        cat /tmp/livekit-simple-templates.yaml
+        exit 1
+    fi
+fi
+
+echo ""
+echo "🚀 Proceeding with LiveKit installation..."
 if helm install "$RELEASE_NAME" livekit/livekit-server \
     --namespace "$NAMESPACE" \
     --values /tmp/livekit-values.yaml \
-    --wait --timeout=10m; then
+    --wait --timeout=15m \
+    --debug; then
     echo "✅ LiveKit installed successfully!"
 else
     echo "❌ LiveKit installation failed"
