@@ -35,8 +35,13 @@ on:
         required: false
         default: false
         type: boolean
-      skip_livekit:
+      skip_load_balancer:
         description: 'Skip Load Balancer Controller Setup'
+        required: false
+        default: false
+        type: boolean
+      skip_livekit:
+        description: 'Skip LiveKit Deployment'
         required: false
         default: false
         type: boolean
@@ -192,7 +197,7 @@ jobs:
     name: 🔧 Step 4 - Setup AWS Load Balancer Controller
     runs-on: ubuntu-latest
     needs: [terraform-apply]
-    if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_livekit && (needs.terraform-apply.result == 'success' || inputs.skip_terraform_apply) }}
+    if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_load_balancer && (needs.terraform-apply.result == 'success' || inputs.skip_terraform_apply) }}
     environment: livekit-poc-${{ inputs.environment }}-setup-load-balancer
     
     steps:
@@ -274,7 +279,8 @@ jobs:
   deploy-livekit:
     name: 🎥 Step 5 - Deploy LiveKit
     runs-on: ubuntu-latest
-    if: ${{ inputs.action == 'deploy' && !inputs.skip_livekit }}
+    needs: [setup-load-balancer-controller]
+    if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_livekit && (needs.setup-load-balancer-controller.result == 'success' || inputs.skip_load_balancer) }}
     environment: livekit-poc-${{ inputs.environment }}-deploy-livekit
     
     steps:
