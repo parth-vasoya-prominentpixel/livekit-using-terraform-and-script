@@ -193,7 +193,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [terraform-apply]
     if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_livekit && (needs.terraform-apply.result == 'success' || inputs.skip_terraform_apply) }}
-    environment: livekit-poc-${{ inputs.environment }}-load-balancer-controller
+    environment: livekit-poc-${{ inputs.environment }}-load-balancer
     
     steps:
       - name: Checkout code
