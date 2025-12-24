@@ -196,17 +196,55 @@ fi
 if [[ "$SA_EXISTS" == "false" ]]; then
     echo "🔄 Creating service account and IAM role..."
     
-    eksctl create iamserviceaccount \
-        --cluster="$CLUSTER_NAME" \
-        --namespace="$LB_NAMESPACE" \
-        --name="$SERVICE_ACCOUNT_NAME" \
-        --role-name="$ROLE_NAME" \
-        --attach-policy-arn="$POLICY_ARN" \
-        --region="$AWS_REGION" \
-        --approve
-    
-    ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
-    echo "✅ Service account and IAM role created"
+    # First check if service account actually exists (eksctl might be wrong)
+    if kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" >/dev/null 2>&1; then
+        echo "✅ Service account actually exists (eksctl detection issue)"
+        SA_EXISTS="true"
+        
+        # Check for IAM role annotation
+        EXISTING_ROLE_ARN=$(kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null || echo "")
+        if [[ -n "$EXISTING_ROLE_ARN" && "$EXISTING_ROLE_ARN" != "null" ]]; then
+            echo "✅ Service account has IAM role: $EXISTING_ROLE_ARN"
+            ROLE_ARN="$EXISTING_ROLE_ARN"
+        else
+            echo "⚠️  Service account exists but no IAM role annotation"
+            # Add annotation to existing service account
+            DEFAULT_ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+            if aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
+                echo "✅ Adding IAM role annotation to existing service account..."
+                kubectl annotate serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" \
+                    eks.amazonaws.com/role-arn="$DEFAULT_ROLE_ARN" \
+                    --overwrite
+                ROLE_ARN="$DEFAULT_ROLE_ARN"
+                echo "✅ Added IAM role annotation"
+            fi
+        fi
+    else
+        # Actually create it
+        echo "📋 Running: eksctl create iamserviceaccount..."
+        
+        EKSCTL_OUTPUT=$(eksctl create iamserviceaccount \
+            --cluster="$CLUSTER_NAME" \
+            --namespace="$LB_NAMESPACE" \
+            --name="$SERVICE_ACCOUNT_NAME" \
+            --role-name="$ROLE_NAME" \
+            --attach-policy-arn="$POLICY_ARN" \
+            --region="$AWS_REGION" \
+            --approve 2>&1)
+        
+        echo "$EKSCTL_OUTPUT"
+        
+        # Check if it actually worked
+        if kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" >/dev/null 2>&1; then
+            ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+            echo "✅ Service account and IAM role created successfully"
+        else
+            echo "❌ eksctl command completed but service account not found"
+            echo "🔍 Checking what eksctl actually did..."
+            kubectl get serviceaccounts -n "$LB_NAMESPACE" | grep -i "load\|controller" || echo "No matching service accounts found"
+            exit 1
+        fi
+    fi
 fi
 
 # Verify service account
@@ -214,15 +252,36 @@ echo "🔍 Verifying service account..."
 if kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" >/dev/null 2>&1; then
     echo "✅ Service account verified: $SERVICE_ACCOUNT_NAME"
     
+    # Show service account details
+    echo "🔍 Service account details:"
+    kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" -o yaml | grep -A 5 annotations || echo "No annotations found"
+    
     # Check IAM role annotation
     FINAL_ROLE_ARN=$(kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null || echo "")
     if [[ -n "$FINAL_ROLE_ARN" && "$FINAL_ROLE_ARN" != "null" ]]; then
         echo "✅ IAM role annotation: $FINAL_ROLE_ARN"
     else
-        echo "⚠️  No IAM role annotation found, but continuing..."
+        echo "⚠️  No IAM role annotation found"
+        echo "🔧 Attempting to add IAM role annotation..."
+        
+        # Try to add annotation manually
+        DEFAULT_ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+        if aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
+            kubectl annotate serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" \
+                eks.amazonaws.com/role-arn="$DEFAULT_ROLE_ARN" \
+                --overwrite
+            echo "✅ Added IAM role annotation: $DEFAULT_ROLE_ARN"
+        else
+            echo "⚠️  IAM role doesn't exist, continuing without annotation"
+        fi
     fi
 else
-    echo "❌ Service account not found"
+    echo "❌ Service account not found after setup"
+    echo "🔍 Available service accounts in $LB_NAMESPACE:"
+    kubectl get serviceaccounts -n "$LB_NAMESPACE" | grep -i "load\|controller" || echo "No matching service accounts found"
+    echo ""
+    echo "🔍 All service accounts in $LB_NAMESPACE:"
+    kubectl get serviceaccounts -n "$LB_NAMESPACE"
     exit 1
 fi
 echo ""
@@ -330,17 +389,42 @@ if [[ "$FINAL_READY" -gt 0 ]]; then
     echo "🎉 SUCCESS: AWS Load Balancer Controller is ready!"
     echo "✅ $FINAL_READY pods ready and running"
     echo "✅ Ready to provision ALBs"
+    
+    # Final success verification
+    echo ""
+    echo "🔍 Final Success Verification:"
+    kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE"
+    kubectl get service aws-load-balancer-webhook-service -n "$LB_NAMESPACE" 2>/dev/null && echo "✅ Webhook service available" || echo "⚠️  Webhook service not found"
+    
+    echo ""
+    echo "✅ AWS Load Balancer Controller setup complete!"
+    echo "📅 Completed at: $(date)"
+    exit 0
 else
-    echo "⚠️  WARNING: Load Balancer Controller may not be fully ready"
+    echo "❌ FAILED: Load Balancer Controller is not ready"
     echo "   $FINAL_RUNNING pods running, $FINAL_READY pods ready"
-    echo "   Check logs: kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller"
+    echo ""
+    echo "🔍 Troubleshooting Information:"
+    echo "================================"
+    
+    # Show deployment status
+    echo "📋 Deployment Status:"
+    kubectl describe deployment aws-load-balancer-controller -n "$LB_NAMESPACE" 2>/dev/null || echo "Deployment not found"
+    
+    echo ""
+    echo "📋 Pod Status:"
+    kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller -o wide 2>/dev/null || echo "No pods found"
+    
+    echo ""
+    echo "📋 Pod Events:"
+    kubectl describe pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller 2>/dev/null | grep -A 10 "Events:" | tail -20 || echo "No pod events"
+    
+    echo ""
+    echo "📋 Recent Cluster Events:"
+    kubectl get events -n "$LB_NAMESPACE" --sort-by='.lastTimestamp' | tail -10
+    
+    echo ""
+    echo "❌ Load Balancer Controller setup failed!"
+    echo "📅 Failed at: $(date)"
+    exit 1
 fi
-
-echo ""
-echo "📋 Next Steps:"
-echo "   1. Load Balancer Controller setup completed"
-echo "   2. You can now deploy services with ALB annotations"
-echo "   3. Monitor status: kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller"
-echo ""
-echo "✅ AWS Load Balancer Controller setup complete!"
-echo "📅 Completed at: $(date)"
