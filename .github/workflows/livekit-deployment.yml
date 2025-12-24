@@ -320,7 +320,7 @@ jobs:
           # Determine cluster name and Redis endpoint
           # Use hardcoded values since infrastructure is already deployed
           CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
-          REDIS_ENDPOINT="clustercfg.livekit-redis.x4ncn3.use1.cache.amazonaws.com:6379"
+          REDIS_ENDPOINT="lp-ec-redis-use1-dev-redis.x4ncn3.ng.0001.use1.cache.amazonaws.com:6379"
           
           echo "📋 Configuration for LiveKit Deployment:"
           echo "📋 Cluster: $CLUSTER_NAME"

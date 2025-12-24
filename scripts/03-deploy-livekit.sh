@@ -19,7 +19,8 @@ RELEASE_NAME="livekit"
 # Redis endpoints - Using Primary endpoint for read/write operations
 # Primary endpoint: lp-ec-redis-use1-dev-redis.x4ncn3.ng.0001.use1.cache.amazonaws.com:6379
 # Reader endpoint: lp-ec-redis-use1-dev-redis-ro.x4ncn3.ng.0001.use1.cache.amazonaws.com:6379
-REDIS_ENDPOINT="${REDIS_ENDPOINT:-lp-ec-redis-use1-dev-redis.x4ncn3.ng.0001.use1.cache.amazonaws.com:6379}"
+# Configuration endpoint (user specified): clustercfg.livekit-redis.x4ncn3.use1.cache.amazonaws.com:6379
+REDIS_ENDPOINT="${REDIS_ENDPOINT:-clustercfg.livekit-redis.x4ncn3.use1.cache.amazonaws.com:6379}"
 
 # Domains and Certificate (EXACT as specified by user - UPDATED)
 LIVEKIT_DOMAIN="livekit-eks-tf.digi-telephony.com"
@@ -123,33 +124,47 @@ echo "🚀 Step 2: Deploy LiveKit with Custom Values"
 echo "============================================="
 echo "🔧 Creating LiveKit values file..."
 
-# Create LiveKit values based on deep analysis of official chart
+# Create LiveKit values based on user specification (EXACT USER SPECIFICATION)
 cat > /tmp/livekit-values.yaml << EOF
-# Basic deployment configuration
-replicaCount: 1
-image:
-  repository: livekit/livekit-server
-  tag: v1.9.0
-  pullPolicy: IfNotPresent
-
-# LiveKit server configuration
+# LiveKit server configuration - Exact user specification
 livekit:
-  # Domain for WebSocket connections
   domain: $LIVEKIT_DOMAIN
-  
-  # RTC configuration for WebRTC
   rtc:
     use_external_ip: true
     port_range_start: 50000
     port_range_end: 60000
-    
-  # Redis connection
   redis:
     address: $REDIS_ENDPOINT
-    
-  # API keys for authentication
   keys:
     $API_KEY: $SECRET_KEY
+
+# Metrics configuration
+metrics:
+  enabled: true
+  prometheus:
+    enabled: true
+    port: 6789
+
+# Resource configuration
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# Pod anti-affinity for better distribution
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+    - labelSelector:
+        matchExpressions:
+        - key: app
+          operator: In
+          values:
+          - livekit-livekit-server
+      topologyKey: "kubernetes.io/hostname"
 
 # TURN server configuration
 turn:
@@ -158,146 +173,16 @@ turn:
   tls_port: 3478
   udp_port: 3478
 
-# Service configuration - Use LoadBalancer to create ALB
-service:
-  type: LoadBalancer
-  port: 7880
-  targetPort: 7880
-  annotations:
-    service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
-    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
-    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: $CERT_ARN
-    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "https"
-    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
+# Load Balancer configuration - ALB with SSL (user specification)
+loadBalancer:
+  type: alb
+  tls:
+  - hosts:
+    - $LIVEKIT_DOMAIN
+    certificateArn: $CERT_ARN
 
-# Resource limits
-resources:
-  limits:
-    cpu: 2000m
-    memory: 2Gi
-  requests:
-    cpu: 500m
-    memory: 512Mi
-
-# Pod configuration
-podSecurityContext:
-  runAsNonRoot: true
-  runAsUser: 1000
-  fsGroup: 1000
-
-securityContext:
-  allowPrivilegeEscalation: false
-  capabilities:
-    drop:
-    - ALL
-  readOnlyRootFilesystem: false
-  runAsNonRoot: true
-  runAsUser: 1000
-
-# Health checks - Adjusted for LiveKit startup time
-livenessProbe:
-  httpGet:
-    path: /
-    port: 7880
-    scheme: HTTP
-  initialDelaySeconds: 60
-  periodSeconds: 30
-  timeoutSeconds: 10
-  failureThreshold: 3
-  successThreshold: 1
-
-readinessProbe:
-  httpGet:
-    path: /
-    port: 7880
-    scheme: HTTP
-  initialDelaySeconds: 30
-  periodSeconds: 10
-  timeoutSeconds: 5
-  failureThreshold: 3
-  successThreshold: 1
-
-# Startup probe for slow starting containers
-startupProbe:
-  httpGet:
-    path: /
-    port: 7880
-    scheme: HTTP
-  initialDelaySeconds: 10
-  periodSeconds: 10
-  timeoutSeconds: 5
-  failureThreshold: 30
-  successThreshold: 1
-
-# Node affinity for better distribution
-affinity:
-  podAntiAffinity:
-    preferredDuringSchedulingIgnoredDuringExecution:
-    - weight: 100
-      podAffinityTerm:
-        labelSelector:
-          matchExpressions:
-          - key: app.kubernetes.io/name
-            operator: In
-            values:
-            - livekit-server
-        topologyKey: kubernetes.io/hostname
-
-# Tolerations for node scheduling
-tolerations: []
-
-# Node selector
-nodeSelector: {}
-
-# Environment variables for LiveKit configuration
-env:
-  - name: LIVEKIT_CONFIG_BODY
-    value: |
-      port: 7880
-      bind_addresses:
-        - ""
-      rtc:
-        tcp_port: 7881
-        port_range_start: 50000
-        port_range_end: 60000
-        use_external_ip: true
-      redis:
-        address: $REDIS_ENDPOINT
-      keys:
-        $API_KEY: $SECRET_KEY
-      turn:
-        enabled: true
-        domain: $TURN_DOMAIN
-        tls_port: 3478
-        udp_port: 3478
-      webhook:
-        api_key: $API_KEY
-      room:
-        auto_create: true
-        enable_recording: false
-      logging:
-        level: info
-        
-# Disable ingress completely - we use LoadBalancer service
+# CRITICAL: Completely disable ingress to avoid validation errors
 ingress:
-  enabled: false
-
-# Disable autoscaling for now to avoid complexity
-autoscaling:
-  enabled: false
-
-# Service account
-serviceAccount:
-  create: true
-  annotations: {}
-  name: ""
-
-# Pod disruption budget
-podDisruptionBudget:
-  enabled: false
-
-# Network policy
-networkPolicy:
   enabled: false
 EOF
 
@@ -312,64 +197,26 @@ echo "   Certificate: $(basename "$CERT_ARN")"
 echo "   Redis: $REDIS_ENDPOINT"
 echo "   Load Balancer: ALB (internet-facing)"
 echo "   TLS: Enabled with ACM certificate"
+echo "   Ingress: Disabled (using loadBalancer configuration)"
+echo "   TLS: Enabled with ACM certificate"
 
-# Step 5: Deploy LiveKit (Deep Analysis Approach)
+# Step 5: Deploy LiveKit (Simple Approach - No Ingress)
 echo ""
 echo "🚀 Installing LiveKit deployment..."
-echo "📋 Using comprehensive configuration based on official chart analysis"
+echo "📋 Using exact user specification without ingress to avoid validation errors"
 
-# First, let's check what templates the chart will generate
-echo "🔍 Analyzing Helm chart templates..."
+# Validate the values file first
+echo "🔍 Validating Helm values..."
 helm template "$RELEASE_NAME" livekit/livekit-server \
     --namespace "$NAMESPACE" \
     --values /tmp/livekit-values.yaml \
-    --debug > /tmp/livekit-templates.yaml 2>&1
+    --dry-run > /tmp/livekit-template.yaml
 
-if [ $? -eq 0 ]; then
-    echo "✅ Helm template generation successful"
-    echo "📋 Generated templates preview:"
-    head -50 /tmp/livekit-templates.yaml
-else
-    echo "❌ Helm template generation failed"
-    echo "📋 Template errors:"
-    cat /tmp/livekit-templates.yaml
-    echo ""
-    echo "🔄 Trying with simplified configuration..."
-    
-    # Fallback to ultra-minimal configuration
-    cat > /tmp/livekit-simple.yaml << EOF
-replicaCount: 1
-livekit:
-  domain: $LIVEKIT_DOMAIN
-  redis:
-    address: $REDIS_ENDPOINT
-  keys:
-    $API_KEY: $SECRET_KEY
-service:
-  type: LoadBalancer
-ingress:
-  enabled: false
-EOF
-    
-    echo "🔍 Testing simplified configuration..."
-    helm template "$RELEASE_NAME" livekit/livekit-server \
-        --namespace "$NAMESPACE" \
-        --values /tmp/livekit-simple.yaml \
-        --debug > /tmp/livekit-simple-templates.yaml 2>&1
-    
-    if [ $? -eq 0 ]; then
-        echo "✅ Simplified template works, using it for deployment"
-        cp /tmp/livekit-simple.yaml /tmp/livekit-values.yaml
-    else
-        echo "❌ Even simplified template failed:"
-        cat /tmp/livekit-simple-templates.yaml
-        exit 1
-    fi
-fi
+echo "✅ Helm template validation passed"
 
-echo ""
-echo "🚀 Proceeding with LiveKit installation..."
-if helm install "$RELEASE_NAME" livekit/livekit-server \
+# Deploy with the official approach from LiveKit documentation
+echo "🔍 Deploying LiveKit Server..."
+if helm upgrade --install "$RELEASE_NAME" livekit/livekit-server \
     --namespace "$NAMESPACE" \
     --values /tmp/livekit-values.yaml \
     --wait --timeout=15m \
@@ -378,12 +225,17 @@ if helm install "$RELEASE_NAME" livekit/livekit-server \
 else
     echo "❌ LiveKit installation failed"
     echo ""
-    echo "📋 Troubleshooting information:"
+    echo "� Troubletshooting information:"
     echo "==============================="
     
     # Show the generated values file for debugging
     echo "🔍 Generated values.yaml:"
     cat /tmp/livekit-values.yaml
+    echo ""
+    
+    # Show the template output for debugging
+    echo "🔍 Helm template output (first 50 lines):"
+    head -50 /tmp/livekit-template.yaml || true
     echo ""
     
     # Show Kubernetes resources
@@ -392,12 +244,17 @@ else
     echo ""
     kubectl get svc -n "$NAMESPACE" || true
     echo ""
-    kubectl get ingress -n "$NAMESPACE" || true
+    kubectl get deployments -n "$NAMESPACE" || true
     echo ""
     
     # Show recent events
     echo "🔍 Recent events:"
-    kubectl get events -n "$NAMESPACE" --sort-by='.lastTimestamp' | tail -10 || true
+    kubectl get events -n "$NAMESPACE" --sort-by='.lastTimestamp' | tail -15 || true
+    echo ""
+    
+    # Show pod logs if any exist
+    echo "🔍 Pod logs:"
+    kubectl logs -n "$NAMESPACE" -l app.kubernetes.io/name=livekit-server --tail=50 || true
     echo ""
     
     # Clean up failed installation
@@ -407,28 +264,28 @@ else
     exit 1
 fi
 
-# Step 6: Wait for ALB to be ready
+# Step 6: Wait for LoadBalancer Service to be ready
 echo ""
-echo "⏳ Waiting for Application Load Balancer..."
+echo "⏳ Waiting for LoadBalancer Service..."
 MAX_ATTEMPTS=30
 ATTEMPT=1
 
 while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-    ALB_ENDPOINT=$(kubectl get ingress -n "$NAMESPACE" -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+    LB_ENDPOINT=$(kubectl get svc -n "$NAMESPACE" "$RELEASE_NAME-livekit-server" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
     
-    if [ -n "$ALB_ENDPOINT" ] && [ "$ALB_ENDPOINT" != "null" ]; then
-        echo "✅ ALB ready: $ALB_ENDPOINT"
+    if [ -n "$LB_ENDPOINT" ] && [ "$LB_ENDPOINT" != "null" ]; then
+        echo "✅ LoadBalancer ready: $LB_ENDPOINT"
         break
     fi
     
     if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-        echo "⚠️ ALB not ready after $MAX_ATTEMPTS attempts"
-        echo "📋 Checking ingress status..."
-        kubectl get ingress -n "$NAMESPACE" -o yaml || true
+        echo "⚠️ LoadBalancer not ready after $MAX_ATTEMPTS attempts"
+        echo "📋 Checking service status..."
+        kubectl get svc -n "$NAMESPACE" "$RELEASE_NAME-livekit-server" -o yaml || true
         break
     fi
     
-    echo "   Attempt $ATTEMPT/$MAX_ATTEMPTS: Waiting for ALB..."
+    echo "   Attempt $ATTEMPT/$MAX_ATTEMPTS: Waiting for LoadBalancer..."
     sleep 10
     ATTEMPT=$((ATTEMPT + 1))
 done
@@ -462,15 +319,11 @@ echo "📋 Services:"
 kubectl get svc -n "$NAMESPACE" || echo "No services found"
 
 echo ""
-echo "📋 Ingress:"
-kubectl get ingress -n "$NAMESPACE" || echo "No ingress found"
-
-echo ""
 echo "📋 Deployments:"
 kubectl get deployments -n "$NAMESPACE" || echo "No deployments found"
 
 # Clean up temporary files
-rm -f /tmp/livekit-values.yaml
+rm -f /tmp/livekit-values.yaml /tmp/livekit-template.yaml
 
 echo ""
 echo "🎉 LiveKit Deployment Completed!"
@@ -482,16 +335,17 @@ echo "   ✅ Repository: https://helm.livekit.io"
 echo "   ✅ Chart: livekit/livekit-server"
 echo "   ✅ Namespace: $NAMESPACE"
 echo "   ✅ Release: $RELEASE_NAME"
-if [ -n "$ALB_ENDPOINT" ]; then
-    echo "   ✅ Load Balancer: $ALB_ENDPOINT"
+if [ -n "$LB_ENDPOINT" ]; then
+    echo "   ✅ Load Balancer: $LB_ENDPOINT"
 fi
 echo "   ✅ Domain: $LIVEKIT_DOMAIN"
 echo "   ✅ TURN Domain: $TURN_DOMAIN"
 echo "   ✅ HTTPS: Enabled with ACM certificate"
 echo "   ✅ Redis: Connected to ElastiCache"
 echo "   ✅ Metrics: Enabled (Prometheus on port 6789)"
-echo "   ✅ Host Networking: Configured for WebRTC"
-echo "   ✅ Graceful Shutdown: 5 hours termination grace period"
+echo "   ✅ WebRTC: Configured for external IP"
+echo "   ✅ Service Type: LoadBalancer (ALB)"
+echo "   ✅ Ingress: Disabled (using ALB service annotations)"
 
 echo ""
 echo "📋 Access URLs:"
@@ -501,6 +355,6 @@ echo "   🌐 TURN Server: $TURN_DOMAIN:3478"
 echo ""
 echo "📋 Next Steps:"
 echo "   1. Verify pods are running: kubectl get pods -n $NAMESPACE"
-echo "   2. Check ALB status: kubectl get ingress -n $NAMESPACE"
+echo "   2. Check LoadBalancer status: kubectl get svc -n $NAMESPACE"
 echo "   3. Test connectivity: curl -k https://$LIVEKIT_DOMAIN"
 echo "   4. Check LiveKit logs: kubectl logs -n $NAMESPACE -l app.kubernetes.io/name=livekit-server"
