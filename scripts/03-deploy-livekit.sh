@@ -109,6 +109,15 @@ echo "🔍 Verifying LiveKit chart availability..."
 helm search repo livekit/livekit-server --versions | head -5
 echo "✅ LiveKit chart found"
 
+# Get VPC information first
+echo ""
+echo "🔍 Getting cluster information..."
+VPC_ID=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query 'cluster.resourcesVpcConfig.vpcId' --output text)
+SUBNET_IDS=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query 'cluster.resourcesVpcConfig.subnetIds' --output text | tr '\t' ',')
+
+echo "✅ VPC ID: $VPC_ID"
+echo "✅ Subnets: $SUBNET_IDS"
+
 # Step 3: Create open security group for ALB
 echo ""
 echo "� Crteating open security group for ALB..."
@@ -118,9 +127,18 @@ SG_DESCRIPTION="Open security group for LiveKit ALB - allows all traffic"
 # Check if security group already exists
 EXISTING_SG=$(aws ec2 describe-security-groups --region "$AWS_REGION" --filters "Name=group-name,Values=$SG_NAME" "Name=vpc-id,Values=$VPC_ID" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "None")
 
-if [ "$EXISTING_SG" != "None" ] && [ -n "$EXISTING_SG" ]; then
+if [ "$EXISTING_SG" != "None" ] && [ -n "$EXISTING_SG" ] && [ "$EXISTING_SG" != "null" ]; then
     echo "✅ Security group already exists: $EXISTING_SG"
     ALB_SECURITY_GROUP="$EXISTING_SG"
+    
+    # Verify it has the right rules (optional - just for info)
+    echo "🔍 Verifying existing security group rules..."
+    INBOUND_RULES=$(aws ec2 describe-security-groups --group-ids "$EXISTING_SG" --region "$AWS_REGION" --query 'SecurityGroups[0].IpPermissions[?FromPort==`80` || FromPort==`443`]' --output text 2>/dev/null || echo "")
+    if [ -n "$INBOUND_RULES" ]; then
+        echo "✅ Security group has HTTP/HTTPS rules configured"
+    else
+        echo "⚠️ Security group exists but may need rule updates"
+    fi
 else
     echo "🔧 Creating new security group..."
     ALB_SECURITY_GROUP=$(aws ec2 create-security-group \
