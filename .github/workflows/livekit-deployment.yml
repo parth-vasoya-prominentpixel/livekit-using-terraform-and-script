@@ -270,6 +270,70 @@ jobs:
           echo "✅ Load Balancer Controller setup completed"
           echo "📄 Full logs available in pipeline output above"
 
+  # Step 5: Deploy LiveKit
+  deploy-livekit:
+    name: 🎥 Step 5 - Deploy LiveKit
+    runs-on: ubuntu-latest
+    needs: [terraform-apply, setup-load-balancer-controller]
+    if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_livekit && (needs.setup-load-balancer-controller.result == 'success' || (inputs.skip_terraform_apply && inputs.skip_livekit == false)) }}
+    environment: livekit-poc-${{ inputs.environment }}-deploy-livekit
+    
+    steps:
+      - name: 📋 Manual Approval - Deploy LiveKit
+        run: |
+          echo "🤔 Manual approval required to deploy LiveKit"
+          echo "📋 This will deploy:"
+          echo "   - LiveKit Server using official Helm chart"
+          echo "   - ALB Ingress with SSL certificate"
+          echo "   - TURN server for WebRTC connectivity"
+          echo "   - Metrics and Prometheus monitoring"
+          echo "🌍 Environment: ${{ inputs.environment }}"
+          echo "⏱️ Time: ~5-10 minutes"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          role-session-name: GitHubActions-Deploy-LiveKit-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Tools
+        run: |
+          curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+          curl -fsSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz | tar -xz
+          sudo mv linux-amd64/helm /usr/local/bin/
+
+      - name: Deploy LiveKit
+        working-directory: scripts
+        run: |
+          chmod +x 03-deploy-livekit.sh
+          
+          # Determine cluster name and Redis endpoint
+          if [ "${{ inputs.skip_terraform_apply }}" = "true" ]; then
+            CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
+            REDIS_ENDPOINT="clustercfg.livekit-redis.x4ncn3.use1.cache.amazonaws.com:6379"
+          else
+            CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
+            REDIS_ENDPOINT="${{ needs.terraform-apply.outputs.redis-endpoint }}"
+          fi
+          
+          echo "📋 Configuration for LiveKit Deployment:"
+          echo "📋 Cluster: $CLUSTER_NAME"
+          echo "📋 Region: ${{ env.AWS_REGION }}"
+          echo "📋 Redis: $REDIS_ENDPOINT"
+          echo "📋 Environment: ${{ inputs.environment }}"
+          echo ""
+          
+          # Deploy LiveKit with configuration
+          CLUSTER_NAME="$CLUSTER_NAME" \
+          AWS_REGION="${{ env.AWS_REGION }}" \
+          REDIS_ENDPOINT="$REDIS_ENDPOINT" \
+          ./03-deploy-livekit.sh
+
   # DESTROY: Remove everything (Optional)
   destroy:
     name: 🗑️ Destroy LiveKit Infrastructure
