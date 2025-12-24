@@ -171,16 +171,16 @@ turn:
   tls_port: 3478
   udp_port: 3478
 
-# Load Balancer Configuration (ALB for AWS)
-loadBalancer:
-  type: alb
+# Service Configuration
+service:
+  type: ClusterIP
+  port: 7880
 
-# Ingress Configuration for AWS ALB
+# Ingress Configuration for AWS ALB (Simplified)
 ingress:
   enabled: true
-  className: "alb"
+  className: alb
   annotations:
-    kubernetes.io/ingress.class: alb
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/subnets: $SUBNET_IDS
@@ -188,22 +188,10 @@ ingress:
     alb.ingress.kubernetes.io/certificate-arn: $CERT_ARN
     alb.ingress.kubernetes.io/ssl-redirect: '443'
   hosts:
-    - host: $LIVEKIT_DOMAIN
-      paths:
-        - path: /
-          pathType: Prefix
+  - $LIVEKIT_DOMAIN
   tls:
-    - hosts:
-      - $LIVEKIT_DOMAIN
-      secretName: livekit-tls
-
-# Service Configuration
-service:
-  type: ClusterIP
-  port: 7880
-
-# Host Networking (as per documentation requirements)
-hostNetwork: false
+  - hosts:
+    - $LIVEKIT_DOMAIN
 
 # Graceful shutdown configuration (as per documentation)
 terminationGracePeriodSeconds: 18000  # 5 hours as recommended in docs
