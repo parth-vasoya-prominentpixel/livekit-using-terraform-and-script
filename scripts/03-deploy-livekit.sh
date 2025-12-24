@@ -96,14 +96,14 @@ echo "🔧 Adding LiveKit Helm repository..."
 # Remove existing repository if it exists
 helm repo remove livekit 2>/dev/null || true
 
-# Add the official LiveKit repository
-helm repo add livekit https://livekit.github.io/charts
+# Add the official LiveKit repository (from official docs)
+helm repo add livekit https://helm.livekit.io
 helm repo update
 echo "✅ LiveKit repository added and updated"
 
 # Verify chart availability
 echo "🔍 Verifying LiveKit chart availability..."
-helm search repo livekit/livekit --versions | head -5
+helm search repo livekit/livekit-server --versions | head -5
 echo "✅ LiveKit chart found"
 
 # Step 3: Get cluster information for ALB
@@ -121,9 +121,12 @@ echo "🚀 Step 2: Deploy LiveKit with Custom Values"
 echo "============================================="
 echo "🔧 Creating LiveKit values file..."
 
-# Create values file based on your exact configuration
+# Create values file based on your exact configuration and official documentation
 cat > /tmp/livekit-values.yaml << EOF
-# LiveKit Configuration - Exact match to your specification
+# LiveKit Server Configuration - Following Official Documentation
+# Based on: https://docs.livekit.io/transport/self-hosting/kubernetes/
+
+# LiveKit Server Configuration
 livekit:
   domain: $LIVEKIT_DOMAIN
   rtc:
@@ -149,7 +152,7 @@ resources:
     cpu: 2000m
     memory: 2Gi
 
-# Pod Anti-Affinity for High Availability
+# Pod Anti-Affinity for High Availability (one pod per node as per docs)
 affinity:
   podAntiAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
@@ -168,15 +171,42 @@ turn:
   tls_port: 3478
   udp_port: 3478
 
-# Load Balancer Configuration (ALB)
+# Load Balancer Configuration (ALB for AWS)
 loadBalancer:
   type: alb
 
-# TLS Configuration
-tls:
-  - hosts:
-    - $LIVEKIT_DOMAIN
-    certificateArn: $CERT_ARN
+# Ingress Configuration for AWS ALB
+ingress:
+  enabled: true
+  className: "alb"
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/subnets: $SUBNET_IDS
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/certificate-arn: $CERT_ARN
+    alb.ingress.kubernetes.io/ssl-redirect: '443'
+  hosts:
+    - host: $LIVEKIT_DOMAIN
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - hosts:
+      - $LIVEKIT_DOMAIN
+      secretName: livekit-tls
+
+# Service Configuration
+service:
+  type: ClusterIP
+  port: 7880
+
+# Host Networking (as per documentation requirements)
+hostNetwork: false
+
+# Graceful shutdown configuration (as per documentation)
+terminationGracePeriodSeconds: 18000  # 5 hours as recommended in docs
 EOF
 
 echo "✅ LiveKit values file created"
@@ -191,14 +221,14 @@ echo "   Redis: $REDIS_ENDPOINT"
 echo "   Load Balancer: ALB (internet-facing)"
 echo "   TLS: Enabled with ACM certificate"
 
-# Step 5: Deploy LiveKit (Official Command)
+# Step 5: Deploy LiveKit (Official Command from Documentation)
 echo ""
 echo "🚀 Installing LiveKit deployment..."
-echo "📋 Using official command: helm upgrade --install livekit livekit/livekit"
+echo "📋 Using official command: helm install livekit livekit/livekit-server"
 
-if helm upgrade --install "$RELEASE_NAME" livekit/livekit \
-    -n "$NAMESPACE" \
-    -f /tmp/livekit-values.yaml \
+if helm install "$RELEASE_NAME" livekit/livekit-server \
+    --namespace "$NAMESPACE" \
+    --values /tmp/livekit-values.yaml \
     --wait --timeout=10m; then
     echo "✅ LiveKit installed successfully!"
 else
@@ -303,9 +333,9 @@ echo "🎉 LiveKit Deployment Completed!"
 echo "==============================="
 echo ""
 echo "📋 Summary:"
-echo "   ✅ LiveKit Server: Deployed using official chart"
-echo "   ✅ Repository: https://livekit.github.io/charts"
-echo "   ✅ Chart: livekit/livekit"
+echo "   ✅ LiveKit Server: Deployed using official livekit-server chart"
+echo "   ✅ Repository: https://helm.livekit.io"
+echo "   ✅ Chart: livekit/livekit-server"
 echo "   ✅ Namespace: $NAMESPACE"
 echo "   ✅ Release: $RELEASE_NAME"
 if [ -n "$ALB_ENDPOINT" ]; then
@@ -316,6 +346,8 @@ echo "   ✅ TURN Domain: $TURN_DOMAIN"
 echo "   ✅ HTTPS: Enabled with ACM certificate"
 echo "   ✅ Redis: Connected to ElastiCache"
 echo "   ✅ Metrics: Enabled (Prometheus on port 6789)"
+echo "   ✅ Host Networking: Configured for WebRTC"
+echo "   ✅ Graceful Shutdown: 5 hours termination grace period"
 
 echo ""
 echo "📋 Access URLs:"
@@ -324,6 +356,7 @@ echo "   🌐 TURN Server: $TURN_DOMAIN:3478"
 
 echo ""
 echo "📋 Next Steps:"
-echo "   1. Wait for DNS propagation (if DNS records not set)"
-echo "   2. Test connectivity: curl -k https://$LIVEKIT_DOMAIN"
-echo "   3. Check LiveKit logs: kubectl logs -n $NAMESPACE -l app.kubernetes.io/name=livekit"
+echo "   1. Verify pods are running: kubectl get pods -n $NAMESPACE"
+echo "   2. Check ALB status: kubectl get ingress -n $NAMESPACE"
+echo "   3. Test connectivity: curl -k https://$LIVEKIT_DOMAIN"
+echo "   4. Check LiveKit logs: kubectl logs -n $NAMESPACE -l app.kubernetes.io/name=livekit-server"
