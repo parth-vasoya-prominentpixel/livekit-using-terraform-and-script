@@ -67,6 +67,12 @@ aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME"
 echo "✅ Kubeconfig updated"
 echo ""
 
+# Get VPC ID from cluster (CRITICAL FIX for metadata issues)
+echo "🔍 Getting VPC information from cluster..."
+VPC_ID=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query 'cluster.resourcesVpcConfig.vpcId' --output text)
+echo "✅ VPC ID: $VPC_ID"
+echo ""
+
 # Verify cluster connectivity
 echo "🔍 Verifying cluster connectivity..."
 if kubectl get nodes >/dev/null 2>&1; then
@@ -329,11 +335,22 @@ if ! (helm list -n "$LB_NAMESPACE" -q | grep -q "aws-load-balancer-controller" &
         --set serviceAccount.create=false \
         --set serviceAccount.name="$SERVICE_ACCOUNT_NAME" \
         --set region="$AWS_REGION" \
+        --set vpcId="$VPC_ID" \
         --version="$HELM_CHART_VERSION"
     
     echo "✅ Helm installation completed"
 else
-    echo "✅ Helm release already deployed"
+    echo "📋 Upgrading existing deployment with VPC ID..."
+    helm upgrade aws-load-balancer-controller eks/aws-load-balancer-controller \
+        -n "$LB_NAMESPACE" \
+        --set clusterName="$CLUSTER_NAME" \
+        --set serviceAccount.create=false \
+        --set serviceAccount.name="$SERVICE_ACCOUNT_NAME" \
+        --set region="$AWS_REGION" \
+        --set vpcId="$VPC_ID" \
+        --version="$HELM_CHART_VERSION"
+    
+    echo "✅ Helm upgrade completed"
 fi
 echo ""
 
@@ -362,9 +379,13 @@ for i in {1..60}; do
     READY_PODS=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | grep -c "1/1.*Running" || echo "0")
     TOTAL_PODS=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | wc -l || echo "0")
     
+    # Clean up variables to avoid octal interpretation
+    READY_PODS=$(echo "$READY_PODS" | sed 's/^0*//' | grep -E '^[0-9]+$' || echo "0")
+    TOTAL_PODS=$(echo "$TOTAL_PODS" | sed 's/^0*//' | grep -E '^[0-9]+$' || echo "0")
+    
     echo "   Pod status: $READY_PODS/$TOTAL_PODS ready (attempt $i/60)"
     
-    if [[ "$READY_PODS" -gt 0 && "$READY_PODS" -eq "$TOTAL_PODS" ]]; then
+    if [ "$READY_PODS" -gt 0 ] && [ "$READY_PODS" -eq "$TOTAL_PODS" ]; then
         echo "✅ All pods are ready!"
         break
     fi
@@ -389,7 +410,11 @@ echo ""
 FINAL_READY=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | grep -c "1/1.*Running" || echo "0")
 FINAL_TOTAL=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | wc -l || echo "0")
 
-if [[ "$FINAL_READY" -gt 0 && "$FINAL_READY" -eq "$FINAL_TOTAL" ]]; then
+# Clean up variables to avoid octal interpretation
+FINAL_READY=$(echo "$FINAL_READY" | sed 's/^0*//' | grep -E '^[0-9]+$' || echo "0")
+FINAL_TOTAL=$(echo "$FINAL_TOTAL" | sed 's/^0*//' | grep -E '^[0-9]+$' || echo "0")
+
+if [ "$FINAL_READY" -gt 0 ] && [ "$FINAL_READY" -eq "$FINAL_TOTAL" ]; then
     echo "🎉 SUCCESS: AWS Load Balancer Controller is ready!"
     echo "✅ $FINAL_READY/$FINAL_TOTAL pods ready and running"
     echo "✅ Controller can now provision ALBs and NLBs"
