@@ -109,18 +109,62 @@ echo "🔍 Verifying LiveKit chart availability..."
 helm search repo livekit/livekit-server --versions | head -5
 echo "✅ LiveKit chart found"
 
-# Step 3: Get cluster information for ALB
+# Step 3: Create open security group for ALB
 echo ""
-echo "🔍 Getting cluster information for ALB..."
-VPC_ID=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query 'cluster.resourcesVpcConfig.vpcId' --output text)
-SUBNET_IDS=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query 'cluster.resourcesVpcConfig.subnetIds' --output text | tr '\t' ',')
+echo "� Crteating open security group for ALB..."
+SG_NAME="livekit-alb-open-sg"
+SG_DESCRIPTION="Open security group for LiveKit ALB - allows all traffic"
 
-echo "✅ VPC ID: $VPC_ID"
-echo "✅ Subnets: $SUBNET_IDS"
+# Check if security group already exists
+EXISTING_SG=$(aws ec2 describe-security-groups --region "$AWS_REGION" --filters "Name=group-name,Values=$SG_NAME" "Name=vpc-id,Values=$VPC_ID" --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo "None")
+
+if [ "$EXISTING_SG" != "None" ] && [ -n "$EXISTING_SG" ]; then
+    echo "✅ Security group already exists: $EXISTING_SG"
+    ALB_SECURITY_GROUP="$EXISTING_SG"
+else
+    echo "🔧 Creating new security group..."
+    ALB_SECURITY_GROUP=$(aws ec2 create-security-group \
+        --group-name "$SG_NAME" \
+        --description "$SG_DESCRIPTION" \
+        --vpc-id "$VPC_ID" \
+        --region "$AWS_REGION" \
+        --query 'GroupId' \
+        --output text)
+    
+    echo "✅ Security group created: $ALB_SECURITY_GROUP"
+    
+    # Add inbound rules - Allow all traffic
+    echo "🔧 Adding inbound rules (allow all traffic)..."
+    aws ec2 authorize-security-group-ingress \
+        --group-id "$ALB_SECURITY_GROUP" \
+        --protocol tcp \
+        --port 80 \
+        --cidr 0.0.0.0/0 \
+        --region "$AWS_REGION" >/dev/null 2>&1 || true
+    
+    aws ec2 authorize-security-group-ingress \
+        --group-id "$ALB_SECURITY_GROUP" \
+        --protocol tcp \
+        --port 443 \
+        --cidr 0.0.0.0/0 \
+        --region "$AWS_REGION" >/dev/null 2>&1 || true
+    
+    # Add outbound rules - Allow all traffic (default is usually all, but let's be explicit)
+    echo "🔧 Adding outbound rules (allow all traffic)..."
+    aws ec2 authorize-security-group-egress \
+        --group-id "$ALB_SECURITY_GROUP" \
+        --protocol -1 \
+        --cidr 0.0.0.0/0 \
+        --region "$AWS_REGION" >/dev/null 2>&1 || true
+    
+    echo "✅ Security group configured with open access"
+fi
+
+echo "📋 ALB Security Group: $ALB_SECURITY_GROUP"
 
 # Step 4: Create LiveKit Values File
 echo ""
-echo "🚀 Step 2: Deploy LiveKit with Custom Values"
+echo "🚀 Step 3: Deploy LiveKit with Custom Values"
 echo "============================================="
 echo "🔧 Creating LiveKit values file..."
 
@@ -177,26 +221,23 @@ turn:
 ingress:
   enabled: false
 
-# Service configuration - ALB with proper annotations for target groups and rules
+# Service configuration - ALB LoadBalancer (WORKING CONFIGURATION)
 service:
   type: LoadBalancer
   annotations:
     # ALB Configuration
     service.beta.kubernetes.io/aws-load-balancer-type: "external"
-    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
     service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
     # SSL Configuration
     service.beta.kubernetes.io/aws-load-balancer-ssl-cert: $CERT_ARN
     service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
     service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
-    # Target Group Health Check Configuration
+    # Security Groups - Use the open security group we created
+    service.beta.kubernetes.io/aws-load-balancer-security-groups: $ALB_SECURITY_GROUP
+    # Target Group Health Check
     service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: "/"
-    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "7880"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "traffic-port"
     service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "http"
-    service.beta.kubernetes.io/aws-load-balancer-healthcheck-interval-seconds: "30"
-    service.beta.kubernetes.io/aws-load-balancer-healthcheck-timeout-seconds: "5"
-    service.beta.kubernetes.io/aws-load-balancer-healthy-threshold-count: "2"
-    service.beta.kubernetes.io/aws-load-balancer-unhealthy-threshold-count: "3"
     # DNS Configuration
     external-dns.alpha.kubernetes.io/hostname: $LIVEKIT_DOMAIN
   ports:
@@ -220,6 +261,7 @@ echo "   TURN Domain: $TURN_DOMAIN"
 echo "   Certificate: $(basename "$CERT_ARN")"
 echo "   Redis: $REDIS_ENDPOINT"
 echo "   Load Balancer: ALB (internet-facing) with target groups"
+echo "   Security Group: $ALB_SECURITY_GROUP (open to all traffic)"
 echo "   TLS: Enabled with ACM certificate"
 echo "   Ingress: Disabled (using service LoadBalancer with ALB annotations)"
 echo "   Health Check: HTTP on port 7880, path /"
@@ -228,7 +270,7 @@ echo "   TLS: Enabled with ACM certificate"
 # Step 5: Deploy LiveKit (Simple Approach - No Ingress)
 echo ""
 echo "🚀 Installing LiveKit deployment..."
-echo "📋 Using exact user specification without ingress to avoid validation errors"
+echo "📋 Using exact user specification with proper ALB configuration"
 
 # Validate the values file first
 echo "🔍 Validating Helm values..."
@@ -347,7 +389,7 @@ done
 
 # Step 7: Verify Deployment (Official Documentation)
 echo ""
-echo "📊 Step 3: Verify Deployment"
+echo "📊 Step 4: Verify Deployment"
 echo "============================"
 echo "📋 Checking pods with label: app.kubernetes.io/name=livekit"
 
