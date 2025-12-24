@@ -511,20 +511,66 @@ fi
 # Step 6: Wait for LoadBalancer Service to be ready and verify ALB setup
 echo ""
 echo "⏳ Waiting for LoadBalancer Service and ALB setup..."
-MAX_ATTEMPTS=30
+
+# First, let's check if there are any existing load balancers that need cleanup
+echo "🔍 Checking for existing load balancers..."
+EXISTING_LBS=$(aws elbv2 describe-load-balancers --region "$AWS_REGION" --query "LoadBalancers[?contains(LoadBalancerName, 'livekit') || contains(DNSName, 'livekit')].{Name:LoadBalancerName,DNS:DNSName,Type:Type}" --output table 2>/dev/null || echo "No existing LBs found")
+echo "$EXISTING_LBS"
+
+# Check AWS Load Balancer Controller logs for any errors
+echo ""
+echo "🔍 Checking AWS Load Balancer Controller logs for errors..."
+kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=20 | grep -i error || echo "No recent errors found"
+
+# Check if the service has the right annotations
+echo ""
+echo "🔍 Verifying service annotations..."
+kubectl describe svc -n "$NAMESPACE" livekit-alb-service | grep -A 20 "Annotations:"
+
+# Force delete any existing conflicting services
+echo ""
+echo "🧹 Cleaning up any conflicting load balancer services..."
+kubectl delete svc -n "$NAMESPACE" --ignore-not-found=true -l "service.beta.kubernetes.io/aws-load-balancer-type=external" || true
+kubectl delete svc -n "$NAMESPACE" --ignore-not-found=true -l "service.beta.kubernetes.io/aws-load-balancer-type=nlb" || true
+
+# Wait a moment for cleanup
+sleep 10
+
+# Recreate the ALB service with explicit cleanup
+echo ""
+echo "🔧 Recreating ALB service with explicit configuration..."
+kubectl delete svc -n "$NAMESPACE" livekit-alb-service --ignore-not-found=true
+sleep 5
+
+# Apply the service again
+kubectl apply -f /tmp/livekit-alb-service.yaml
+
+# Check the service status immediately
+echo ""
+echo "📋 Service created, checking status..."
+kubectl get svc -n "$NAMESPACE" livekit-alb-service
+
+MAX_ATTEMPTS=15
 ATTEMPT=1
 
 while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
     # Check our custom ALB service first
     LB_ENDPOINT=$(kubectl get svc -n "$NAMESPACE" "livekit-alb-service" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
     
-    # If custom service doesn't have endpoint, check the Helm chart service
-    if [ -z "$LB_ENDPOINT" ] || [ "$LB_ENDPOINT" = "null" ]; then
-        LB_ENDPOINT=$(kubectl get svc -n "$NAMESPACE" "$RELEASE_NAME-livekit-server" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
-    fi
-    
     if [ -n "$LB_ENDPOINT" ] && [ "$LB_ENDPOINT" != "null" ]; then
         echo "✅ LoadBalancer ready: $LB_ENDPOINT"
+        
+        # Verify it's an ALB (not NLB)
+        if echo "$LB_ENDPOINT" | grep -q "\.elb\."; then
+            LB_TYPE=$(aws elbv2 describe-load-balancers --region "$AWS_REGION" --query "LoadBalancers[?DNSName=='$LB_ENDPOINT'].Type" --output text 2>/dev/null || echo "unknown")
+            echo "📋 Load Balancer Type: $LB_TYPE"
+            
+            if [ "$LB_TYPE" = "application" ]; then
+                echo "✅ Confirmed: Application Load Balancer created successfully!"
+            else
+                echo "⚠️ Warning: Load Balancer type is $LB_TYPE, not application"
+            fi
+        fi
         
         # Verify ALB and Target Groups
         echo "🔍 Verifying ALB configuration..."
@@ -560,14 +606,35 @@ while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
     fi
     
     if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-        echo "⚠️ LoadBalancer not ready after $MAX_ATTEMPTS attempts"
-        echo "📋 Checking service status..."
-        kubectl get svc -n "$NAMESPACE" || true
+        echo "❌ LoadBalancer still not ready after $MAX_ATTEMPTS attempts"
+        echo ""
+        echo "🔍 TROUBLESHOOTING:"
+        echo "==================="
+        
+        # Check AWS Load Balancer Controller status
+        echo "📋 AWS Load Balancer Controller status:"
+        kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+        
+        # Check recent controller logs
+        echo ""
+        echo "📋 Recent AWS Load Balancer Controller logs:"
+        kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=50 | grep -i "livekit\|error\|failed" || echo "No relevant logs found"
+        
+        # Check service events
+        echo ""
+        echo "📋 Service events:"
+        kubectl describe svc -n "$NAMESPACE" livekit-alb-service | grep -A 10 "Events:" || echo "No events found"
+        
+        # Show all services
+        echo ""
+        echo "📋 All services in namespace:"
+        kubectl get svc -n "$NAMESPACE"
+        
         break
     fi
     
-    echo "   Attempt $ATTEMPT/$MAX_ATTEMPTS: Waiting for LoadBalancer..."
-    sleep 10
+    echo "   Attempt $ATTEMPT/$MAX_ATTEMPTS: Waiting for LoadBalancer (checking every 20 seconds)..."
+    sleep 20
     ATTEMPT=$((ATTEMPT + 1))
 done
 
