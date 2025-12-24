@@ -21,7 +21,7 @@ REDIS_ENDPOINT="${REDIS_ENDPOINT:-clustercfg.livekit-redis.x4ncn3.use1.cache.ama
 
 # Domains and Certificate
 LIVEKIT_DOMAIN="livekit-eks-tf.digi-telephony.com"
-TURN_DOMAIN="turn-eks-tf.digi-telephony.com"
+TURN_DOMAIN="turn-eks-tf.livekit.digi-telephony.com"
 CERT_ARN="arn:aws:acm:us-east-1:918595516608:certificate/4523a895-7899-41a3-8589-2a5baed3b420"
 
 # API Keys
@@ -160,6 +160,34 @@ tls:
     - $LIVEKIT_DOMAIN
     certificateArn: $CERT_ARN
 
+# Explicitly disable ingress to prevent the error
+ingress:
+  enabled: false
+
+# Service configuration
+service:
+  type: LoadBalancer
+  port: 7880
+
+# Health check configuration to fix readiness probe issues
+livenessProbe:
+  httpGet:
+    path: /
+    port: 7880
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /
+    port: 7880
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
 autoscaling:
   enabled: true
   minReplicas: 1
@@ -186,6 +214,20 @@ affinity:
           values:
           - livekit-livekit-server
       topologyKey: "kubernetes.io/hostname"
+
+# Environment variables for better startup
+env:
+  - name: LIVEKIT_CONFIG
+    value: |
+      port: 7880
+      rtc:
+        use_external_ip: true
+        port_range_start: 50000
+        port_range_end: 60000
+      redis:
+        address: $REDIS_ENDPOINT
+      keys:
+        $API_KEY: $SECRET_KEY
 EOF
 
 echo "✅ LiveKit values file created"
