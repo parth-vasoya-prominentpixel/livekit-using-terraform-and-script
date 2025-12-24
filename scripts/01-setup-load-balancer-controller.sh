@@ -1,15 +1,15 @@
 #!/bin/bash
 
 # AWS Load Balancer Controller Setup Script
-# Following EXACT AWS Documentation: https://docs.aws.amazon.com/eks/latest/userguide/lbc-helm.html
-# Handles all cases properly - existing resources, new clusters, etc.
+# Following AWS Documentation: https://docs.aws.amazon.com/eks/latest/userguide/lbc-helm.html
+# Proper approach without problematic eksctl commands
 
 set -euo pipefail
 
 echo "🔧 AWS Load Balancer Controller Setup"
 echo "===================================="
 echo "📅 Started at: $(date)"
-echo "📋 Following official AWS documentation exactly"
+echo "📋 Following AWS documentation step by step"
 echo ""
 
 # Configuration
@@ -17,7 +17,7 @@ CLUSTER_NAME="${CLUSTER_NAME:-}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 ENVIRONMENT="${ENVIRONMENT:-dev}"
 
-# AWS Load Balancer Controller configuration (EXACT AWS DEFAULTS)
+# AWS Load Balancer Controller configuration
 SERVICE_ACCOUNT_NAME="aws-load-balancer-controller"
 LB_NAMESPACE="kube-system"
 POLICY_NAME="AWSLoadBalancerControllerIAMPolicy"
@@ -33,7 +33,6 @@ fi
 echo "📋 Configuration:"
 echo "   Cluster: $CLUSTER_NAME"
 echo "   Region: $AWS_REGION"
-echo "   Environment: $ENVIRONMENT"
 echo "   Service Account: $SERVICE_ACCOUNT_NAME"
 echo "   IAM Role: $ROLE_NAME"
 echo "   IAM Policy: $POLICY_NAME"
@@ -46,7 +45,7 @@ command_exists() {
 
 # Verify required tools
 echo "🔧 Verifying required tools..."
-for tool in aws kubectl helm eksctl jq curl; do
+for tool in aws kubectl helm curl; do
     if command_exists "$tool"; then
         echo "✅ $tool: available"
     else
@@ -80,17 +79,15 @@ fi
 echo ""
 
 # =============================================================================
-# STEP 0: CHECK IF ALREADY INSTALLED AND WORKING
+# CHECK IF ALREADY INSTALLED AND WORKING
 # =============================================================================
 
-echo "📋 Step 0: Checking if AWS Load Balancer Controller is already working..."
+echo "📋 Checking if AWS Load Balancer Controller is already working..."
 
-# Check if deployment exists and is healthy
 if kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" >/dev/null 2>&1; then
     READY_REPLICAS=$(kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
     DESIRED_REPLICAS=$(kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
     
-    # Handle null values
     if [[ "${READY_REPLICAS}" == "null" || "${READY_REPLICAS}" == "" ]]; then
         READY_REPLICAS="0"
     fi
@@ -101,47 +98,46 @@ if kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" >/dev/
     echo "ℹ️  Found existing deployment: ${READY_REPLICAS}/${DESIRED_REPLICAS} replicas ready"
     
     if [[ "${READY_REPLICAS}" -gt 0 ]]; then
-        echo "🎉 AWS Load Balancer Controller is already working perfectly!"
+        echo "🎉 AWS Load Balancer Controller is already working!"
         echo ""
         echo "🔍 Current Status:"
         kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE"
         kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller
-        kubectl get service aws-load-balancer-webhook-service -n "$LB_NAMESPACE" 2>/dev/null || echo "Webhook service: checking..."
         echo ""
-        echo "✅ Load Balancer Controller is ready for use!"
+        echo "✅ Load Balancer Controller is ready!"
         echo "📅 Completed at: $(date)"
         exit 0
     else
         echo "⚠️  Deployment exists but not healthy, will fix it"
     fi
 else
-    echo "ℹ️  No existing deployment found, will install fresh"
+    echo "ℹ️  No existing deployment found"
 fi
 echo ""
 
 # =============================================================================
-# STEP 1: CREATE IAM ROLE USING EKSCTL (EXACT AWS DOCUMENTATION)
+# STEP 1: CREATE IAM POLICY
 # =============================================================================
 
-echo "📋 Step 1: Create IAM Role using eksctl (AWS Documentation)"
-echo "==========================================================="
+echo "📋 Step 1: Create IAM Policy"
+echo "============================"
 
-# Sub-step 1a: Download IAM policy
-echo "📋 Step 1a: Download IAM policy for AWS Load Balancer Controller..."
 POLICY_ARN="arn:aws:iam::$ACCOUNT_ID:policy/$POLICY_NAME"
 
 if aws iam get-policy --policy-arn "$POLICY_ARN" >/dev/null 2>&1; then
     echo "✅ IAM policy already exists: $POLICY_NAME"
     echo "   Policy ARN: $POLICY_ARN"
 else
-    echo "🔄 Downloading and creating IAM policy..."
+    echo "🔄 Creating IAM policy..."
     
-    # Download IAM policy (exact AWS documentation command)
+    # Download IAM policy from AWS documentation
+    echo "📋 Downloading IAM policy from AWS documentation..."
     curl -O https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.14.1/docs/install/iam_policy.json
     
-    # Create IAM policy (exact AWS documentation command)
+    # Create IAM policy
+    echo "📋 Creating IAM policy..."
     aws iam create-policy \
-        --policy-name AWSLoadBalancerControllerIAMPolicy \
+        --policy-name "$POLICY_NAME" \
         --policy-document file://iam_policy.json
     
     # Clean up
@@ -151,197 +147,218 @@ else
 fi
 echo ""
 
-# Sub-step 1b: Create IAM service account
-echo "📋 Step 1b: Create IAM service account using eksctl..."
+# =============================================================================
+# STEP 2: CREATE IAM ROLE AND SERVICE ACCOUNT (MANUAL APPROACH)
+# =============================================================================
 
-# Check if service account already exists
-SA_EXISTS="false"
+echo "📋 Step 2: Create IAM Role and Service Account"
+echo "=============================================="
+
+# Get OIDC issuer URL
+echo "🔍 Getting OIDC issuer URL for cluster..."
+OIDC_ISSUER=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query "cluster.identity.oidc.issuer" --output text)
+OIDC_ID=$(echo "$OIDC_ISSUER" | cut -d '/' -f 5)
+echo "✅ OIDC Issuer: $OIDC_ISSUER"
+echo "✅ OIDC ID: $OIDC_ID"
+echo ""
+
+# Check if OIDC provider exists
+echo "🔍 Checking OIDC identity provider..."
+if aws iam get-open-id-connect-provider --open-id-connect-provider-arn "arn:aws:iam::$ACCOUNT_ID:oidc-provider/oidc.eks.$AWS_REGION.amazonaws.com/id/$OIDC_ID" >/dev/null 2>&1; then
+    echo "✅ OIDC provider already exists"
+else
+    echo "🔄 Creating OIDC identity provider..."
+    
+    # Get root CA thumbprint
+    THUMBPRINT=$(echo | openssl s_client -servername oidc.eks.$AWS_REGION.amazonaws.com -connect oidc.eks.$AWS_REGION.amazonaws.com:443 2>/dev/null | openssl x509 -fingerprint -noout -sha1 | sed 's/://g' | awk -F= '{print tolower($2)}')
+    
+    aws iam create-open-id-connect-provider \
+        --url "$OIDC_ISSUER" \
+        --client-id-list sts.amazonaws.com \
+        --thumbprint-list "$THUMBPRINT"
+    
+    echo "✅ OIDC provider created"
+fi
+echo ""
+
+# Create IAM role trust policy
+echo "🔄 Creating IAM role trust policy..."
+cat > trust-policy.json << EOF
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {
+                "Federated": "arn:aws:iam::$ACCOUNT_ID:oidc-provider/oidc.eks.$AWS_REGION.amazonaws.com/id/$OIDC_ID"
+            },
+            "Action": "sts:AssumeRoleWithWebIdentity",
+            "Condition": {
+                "StringEquals": {
+                    "oidc.eks.$AWS_REGION.amazonaws.com/id/$OIDC_ID:sub": "system:serviceaccount:kube-system:aws-load-balancer-controller",
+                    "oidc.eks.$AWS_REGION.amazonaws.com/id/$OIDC_ID:aud": "sts.amazonaws.com"
+                }
+            }
+        }
+    ]
+}
+EOF
+
+# Create or update IAM role
+if aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
+    echo "✅ IAM role already exists: $ROLE_NAME"
+    
+    # Update trust policy
+    echo "🔄 Updating trust policy..."
+    aws iam update-assume-role-policy --role-name "$ROLE_NAME" --policy-document file://trust-policy.json
+    echo "✅ Trust policy updated"
+else
+    echo "🔄 Creating IAM role..."
+    aws iam create-role \
+        --role-name "$ROLE_NAME" \
+        --assume-role-policy-document file://trust-policy.json \
+        --description "IAM role for AWS Load Balancer Controller"
+    echo "✅ IAM role created: $ROLE_NAME"
+fi
+
+# Clean up trust policy file
+rm -f trust-policy.json
+
+# Attach policy to role
+echo "🔄 Attaching policy to role..."
+aws iam attach-role-policy \
+    --role-name "$ROLE_NAME" \
+    --policy-arn "$POLICY_ARN"
+echo "✅ Policy attached to role"
+echo ""
+
+# Create Kubernetes service account
+echo "🔄 Creating Kubernetes service account..."
 if kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" >/dev/null 2>&1; then
-    echo "ℹ️  Service account '$SERVICE_ACCOUNT_NAME' already exists"
-    
-    # Check if it has proper IAM role annotation
-    EXISTING_ROLE_ARN=$(kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null || echo "")
-    
-    if [[ -n "$EXISTING_ROLE_ARN" && "$EXISTING_ROLE_ARN" != "null" ]]; then
-        echo "✅ Service account has IAM role: $EXISTING_ROLE_ARN"
-        SA_EXISTS="true"
-        
-        # Verify the role exists in AWS
-        ROLE_NAME_FROM_ARN=$(echo "$EXISTING_ROLE_ARN" | cut -d'/' -f2)
-        if aws iam get-role --role-name "$ROLE_NAME_FROM_ARN" >/dev/null 2>&1; then
-            echo "✅ IAM role verified in AWS: $ROLE_NAME_FROM_ARN"
-        else
-            echo "⚠️  IAM role not found in AWS, will recreate"
-            SA_EXISTS="false"
-        fi
-    else
-        echo "⚠️  Service account exists but no IAM role annotation"
-        SA_EXISTS="false"
-    fi
+    echo "✅ Service account already exists: $SERVICE_ACCOUNT_NAME"
+else
+    kubectl create serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE"
+    echo "✅ Service account created: $SERVICE_ACCOUNT_NAME"
 fi
 
-# Create or fix service account
-if [[ "$SA_EXISTS" == "false" ]]; then
-    echo "🔄 Creating/fixing service account with IAM role..."
-    
-    # Use exact AWS documentation command with --override-existing-serviceaccounts
-    echo "📋 Running eksctl command (AWS documentation):"
-    echo "eksctl create iamserviceaccount \\"
-    echo "    --cluster=$CLUSTER_NAME \\"
-    echo "    --namespace=kube-system \\"
-    echo "    --name=aws-load-balancer-controller \\"
-    echo "    --attach-policy-arn=arn:aws:iam::$ACCOUNT_ID:policy/AWSLoadBalancerControllerIAMPolicy \\"
-    echo "    --override-existing-serviceaccounts \\"
-    echo "    --region $AWS_REGION \\"
-    echo "    --approve"
-    echo ""
-    
-    eksctl create iamserviceaccount \
-        --cluster="$CLUSTER_NAME" \
-        --namespace=kube-system \
-        --name=aws-load-balancer-controller \
-        --attach-policy-arn="arn:aws:iam::$ACCOUNT_ID:policy/AWSLoadBalancerControllerIAMPolicy" \
-        --override-existing-serviceaccounts \
-        --region "$AWS_REGION" \
-        --approve
-    
-    echo "✅ eksctl command completed"
-fi
+# Add IAM role annotation to service account
+echo "🔄 Adding IAM role annotation to service account..."
+kubectl annotate serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" \
+    eks.amazonaws.com/role-arn="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME" \
+    --overwrite
+echo "✅ IAM role annotation added"
+echo ""
 
-# Verify service account exists and is properly configured
+# Verify service account configuration
 echo "🔍 Verifying service account configuration..."
 if kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" >/dev/null 2>&1; then
     echo "✅ Service account exists: $SERVICE_ACCOUNT_NAME"
     
-    # Check IAM role annotation
-    FINAL_ROLE_ARN=$(kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null || echo "")
-    if [[ -n "$FINAL_ROLE_ARN" && "$FINAL_ROLE_ARN" != "null" ]]; then
-        echo "✅ IAM role annotation: $FINAL_ROLE_ARN"
-        
-        # Verify role exists in AWS
-        ROLE_NAME_FROM_ARN=$(echo "$FINAL_ROLE_ARN" | cut -d'/' -f2)
-        if aws iam get-role --role-name "$ROLE_NAME_FROM_ARN" >/dev/null 2>&1; then
-            echo "✅ IAM role verified in AWS: $ROLE_NAME_FROM_ARN"
-        else
-            echo "❌ IAM role not found in AWS: $ROLE_NAME_FROM_ARN"
-            exit 1
-        fi
+    ROLE_ARN=$(kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null || echo "")
+    if [[ -n "$ROLE_ARN" && "$ROLE_ARN" != "null" ]]; then
+        echo "✅ IAM role annotation: $ROLE_ARN"
     else
         echo "❌ Service account missing IAM role annotation"
-        echo "🔍 Service account details:"
-        kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" -o yaml
         exit 1
     fi
 else
-    echo "❌ Service account not found: $SERVICE_ACCOUNT_NAME"
-    echo "🔍 Available service accounts in $LB_NAMESPACE:"
-    kubectl get serviceaccounts -n "$LB_NAMESPACE"
+    echo "❌ Service account not found"
     exit 1
 fi
 echo ""
 
 # =============================================================================
-# STEP 2: INSTALL AWS LOAD BALANCER CONTROLLER (EXACT AWS DOCUMENTATION)
+# STEP 3: INSTALL CERT-MANAGER (REQUIRED)
 # =============================================================================
 
-echo "📋 Step 2: Install AWS Load Balancer Controller (AWS Documentation)"
-echo "=================================================================="
+echo "📋 Step 3: Install cert-manager (Required)"
+echo "=========================================="
 
-# Sub-step 2a: Add eks-charts Helm repository
-echo "📋 Step 2a: Add eks-charts Helm repository..."
-echo "🔄 Running: helm repo add eks https://aws.github.io/eks-charts"
+if kubectl get namespace cert-manager >/dev/null 2>&1; then
+    echo "✅ cert-manager namespace already exists"
+else
+    echo "🔄 Installing cert-manager..."
+    kubectl apply --validate=false -f https://github.com/jetstack/cert-manager/releases/download/v1.13.0/cert-manager.yaml
+    
+    echo "⏳ Waiting for cert-manager to be ready..."
+    kubectl wait --for=condition=available --timeout=300s deployment/cert-manager -n cert-manager
+    kubectl wait --for=condition=available --timeout=300s deployment/cert-manager-cainjector -n cert-manager
+    kubectl wait --for=condition=available --timeout=300s deployment/cert-manager-webhook -n cert-manager
+    
+    echo "✅ cert-manager installed and ready"
+fi
+echo ""
+
+# =============================================================================
+# STEP 4: INSTALL AWS LOAD BALANCER CONTROLLER
+# =============================================================================
+
+echo "📋 Step 4: Install AWS Load Balancer Controller"
+echo "=============================================="
+
+# Add Helm repository
+echo "🔄 Adding EKS Helm repository..."
 helm repo add eks https://aws.github.io/eks-charts
-
-echo "🔄 Running: helm repo update eks"
-helm repo update eks
+helm repo update
 echo "✅ Helm repository configured"
 echo ""
 
-# Sub-step 2b: Install AWS Load Balancer Controller
-echo "📋 Step 2b: Install AWS Load Balancer Controller..."
+# Install AWS Load Balancer Controller
+echo "🔄 Installing AWS Load Balancer Controller..."
 
-# Check if Helm release already exists
+# Check if already installed
 if helm list -n "$LB_NAMESPACE" -q | grep -q "aws-load-balancer-controller"; then
     RELEASE_STATUS=$(helm list -n "$LB_NAMESPACE" -f "aws-load-balancer-controller" -o json | jq -r '.[0].status' 2>/dev/null || echo "unknown")
     echo "ℹ️  Helm release exists with status: $RELEASE_STATUS"
     
     if [[ "$RELEASE_STATUS" != "deployed" ]]; then
-        echo "⚠️  Helm release status is '$RELEASE_STATUS', removing and reinstalling..."
+        echo "⚠️  Removing failed release..."
         helm uninstall aws-load-balancer-controller -n "$LB_NAMESPACE"
         sleep 5
-    else
-        echo "ℹ️  Helm release is deployed, checking if upgrade needed..."
     fi
 fi
 
-# Install or upgrade using exact AWS documentation command
-echo "🔄 Installing AWS Load Balancer Controller using Helm..."
-echo "📋 Running exact AWS documentation command:"
-echo "helm install aws-load-balancer-controller eks/aws-load-balancer-controller \\"
-echo "  -n kube-system \\"
-echo "  --set clusterName=$CLUSTER_NAME \\"
-echo "  --set serviceAccount.create=false \\"
-echo "  --set serviceAccount.name=aws-load-balancer-controller \\"
-echo "  --version 1.14.0"
-echo ""
-
-# Check if already installed
-if helm list -n "$LB_NAMESPACE" -q | grep -q "aws-load-balancer-controller" && \
-   helm list -n "$LB_NAMESPACE" -f "aws-load-balancer-controller" -o json | jq -r '.[0].status' | grep -q "deployed"; then
-    echo "✅ Helm release already deployed, checking if working..."
-else
-    # Install fresh
+# Install using Helm
+if ! (helm list -n "$LB_NAMESPACE" -q | grep -q "aws-load-balancer-controller" && \
+      helm list -n "$LB_NAMESPACE" -f "aws-load-balancer-controller" -o json | jq -r '.[0].status' | grep -q "deployed"); then
+    
+    echo "📋 Installing with Helm..."
     helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
-        -n kube-system \
+        -n "$LB_NAMESPACE" \
         --set clusterName="$CLUSTER_NAME" \
         --set serviceAccount.create=false \
-        --set serviceAccount.name=aws-load-balancer-controller \
-        --version 1.14.0
+        --set serviceAccount.name="$SERVICE_ACCOUNT_NAME" \
+        --set region="$AWS_REGION" \
+        --version="$HELM_CHART_VERSION"
     
     echo "✅ Helm installation completed"
+else
+    echo "✅ Helm release already deployed"
 fi
 echo ""
 
 # =============================================================================
-# STEP 3: VERIFY CONTROLLER IS INSTALLED (EXACT AWS DOCUMENTATION)
+# STEP 5: VERIFY INSTALLATION
 # =============================================================================
 
-echo "📋 Step 3: Verify that the controller is installed (AWS Documentation)"
-echo "===================================================================="
+echo "📋 Step 5: Verify Installation"
+echo "=============================="
 
-echo "🔄 Running: kubectl get deployment -n kube-system aws-load-balancer-controller"
-echo ""
-
-# Wait for deployment to exist
+# Wait for deployment
 echo "⏳ Waiting for deployment to be created..."
 for i in {1..30}; do
     if kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" >/dev/null 2>&1; then
         echo "✅ Deployment found"
         break
     else
-        echo "   Waiting for deployment... (attempt $i/30)"
+        echo "   Waiting... (attempt $i/30)"
         sleep 2
     fi
 done
 
-# Verify deployment exists
-if ! kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" >/dev/null 2>&1; then
-    echo "❌ Deployment not found after installation"
-    echo "🔍 Checking Helm releases:"
-    helm list -n "$LB_NAMESPACE"
-    echo "🔍 Checking events:"
-    kubectl get events -n "$LB_NAMESPACE" --sort-by='.lastTimestamp' | tail -10
-    exit 1
-fi
-
-# Show deployment status (exact AWS documentation command)
-echo "📋 Deployment Status:"
-kubectl get deployment -n kube-system aws-load-balancer-controller
-echo ""
-
 # Wait for pods to be ready
 echo "⏳ Waiting for pods to be ready..."
-for i in {1..60}; do  # 5 minutes max
+for i in {1..60}; do
     READY_PODS=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | grep -c "1/1.*Running" || echo "0")
     TOTAL_PODS=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | wc -l || echo "0")
     
@@ -352,12 +369,6 @@ for i in {1..60}; do  # 5 minutes max
         break
     fi
     
-    # Show pod details every 10 attempts
-    if [[ $((i % 10)) -eq 0 ]]; then
-        echo "🔍 Current pod status:"
-        kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller
-    fi
-    
     sleep 5
 done
 
@@ -366,19 +377,12 @@ echo ""
 echo "🔍 Final Verification:"
 echo "====================="
 
-# Show deployment (AWS documentation verification)
 echo "📋 Deployment Status:"
-kubectl get deployment -n kube-system aws-load-balancer-controller
+kubectl get deployment -n "$LB_NAMESPACE" aws-load-balancer-controller
 echo ""
 
-# Show pods
 echo "📋 Pod Status:"
 kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller
-echo ""
-
-# Check webhook service
-echo "📋 Webhook Service:"
-kubectl get service aws-load-balancer-webhook-service -n "$LB_NAMESPACE" 2>/dev/null || echo "⚠️  Webhook service not found (may still be starting)"
 echo ""
 
 # Final status check
@@ -386,13 +390,9 @@ FINAL_READY=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-
 FINAL_TOTAL=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | wc -l || echo "0")
 
 if [[ "$FINAL_READY" -gt 0 && "$FINAL_READY" -eq "$FINAL_TOTAL" ]]; then
-    echo "🎉 SUCCESS: AWS Load Balancer Controller is installed and ready!"
+    echo "🎉 SUCCESS: AWS Load Balancer Controller is ready!"
     echo "✅ $FINAL_READY/$FINAL_TOTAL pods ready and running"
     echo "✅ Controller can now provision ALBs and NLBs"
-    echo ""
-    echo "📋 Expected Output (AWS Documentation):"
-    echo "NAME                           READY   UP-TO-DATE   AVAILABLE   AGE"
-    kubectl get deployment -n kube-system aws-load-balancer-controller --no-headers
     echo ""
     echo "✅ Installation completed successfully!"
     echo "📅 Completed at: $(date)"
@@ -401,25 +401,11 @@ else
     echo "❌ FAILED: AWS Load Balancer Controller is not ready"
     echo "   $FINAL_READY/$FINAL_TOTAL pods ready"
     echo ""
-    echo "🔍 Troubleshooting Information:"
-    echo "================================"
-    
-    # Show deployment details
-    echo "📋 Deployment Details:"
+    echo "🔍 Troubleshooting:"
     kubectl describe deployment aws-load-balancer-controller -n "$LB_NAMESPACE"
     echo ""
-    
-    # Show pod details
-    echo "📋 Pod Details:"
     kubectl describe pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller
     echo ""
-    
-    # Show recent events
-    echo "📋 Recent Events:"
-    kubectl get events -n "$LB_NAMESPACE" --sort-by='.lastTimestamp' | tail -15
-    echo ""
-    
     echo "❌ Installation failed!"
-    echo "📅 Failed at: $(date)"
     exit 1
 fi
