@@ -124,7 +124,7 @@ echo "🚀 Step 2: Deploy LiveKit with Custom Values"
 echo "============================================="
 echo "🔧 Creating LiveKit values file..."
 
-# Create LiveKit values based on user specification (EXACT USER SPECIFICATION)
+# Create LiveKit values based on user specification (FIXED ALB SERVICE CONFIGURATION)
 cat > /tmp/livekit-values.yaml << EOF
 # LiveKit server configuration - Exact user specification
 livekit:
@@ -173,17 +173,41 @@ turn:
   tls_port: 3478
   udp_port: 3478
 
-# Load Balancer configuration - ALB with SSL (user specification)
-loadBalancer:
-  type: alb
-  tls:
-  - hosts:
-    - $LIVEKIT_DOMAIN
-    certificateArn: $CERT_ARN
-
 # CRITICAL: Completely disable ingress to avoid validation errors
 ingress:
   enabled: false
+
+# Service configuration - ALB with proper annotations for target groups and rules
+service:
+  type: LoadBalancer
+  annotations:
+    # ALB Configuration
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    # SSL Configuration
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: $CERT_ARN
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
+    # Target Group Health Check Configuration
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: "/"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "7880"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "http"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-interval-seconds: "30"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-timeout-seconds: "5"
+    service.beta.kubernetes.io/aws-load-balancer-healthy-threshold-count: "2"
+    service.beta.kubernetes.io/aws-load-balancer-unhealthy-threshold-count: "3"
+    # DNS Configuration
+    external-dns.alpha.kubernetes.io/hostname: $LIVEKIT_DOMAIN
+  ports:
+  - name: http
+    port: 80
+    targetPort: 7880
+    protocol: TCP
+  - name: https
+    port: 443
+    targetPort: 7880
+    protocol: TCP
 EOF
 
 echo "✅ LiveKit values file created"
@@ -195,9 +219,10 @@ echo "   Domain: $LIVEKIT_DOMAIN"
 echo "   TURN Domain: $TURN_DOMAIN"
 echo "   Certificate: $(basename "$CERT_ARN")"
 echo "   Redis: $REDIS_ENDPOINT"
-echo "   Load Balancer: ALB (internet-facing)"
+echo "   Load Balancer: ALB (internet-facing) with target groups"
 echo "   TLS: Enabled with ACM certificate"
-echo "   Ingress: Disabled (using loadBalancer configuration)"
+echo "   Ingress: Disabled (using service LoadBalancer with ALB annotations)"
+echo "   Health Check: HTTP on port 7880, path /"
 echo "   TLS: Enabled with ACM certificate"
 
 # Step 5: Deploy LiveKit (Simple Approach - No Ingress)
@@ -264,9 +289,9 @@ else
     exit 1
 fi
 
-# Step 6: Wait for LoadBalancer Service to be ready
+# Step 6: Wait for LoadBalancer Service to be ready and verify ALB setup
 echo ""
-echo "⏳ Waiting for LoadBalancer Service..."
+echo "⏳ Waiting for LoadBalancer Service and ALB setup..."
 MAX_ATTEMPTS=30
 ATTEMPT=1
 
@@ -275,6 +300,36 @@ while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
     
     if [ -n "$LB_ENDPOINT" ] && [ "$LB_ENDPOINT" != "null" ]; then
         echo "✅ LoadBalancer ready: $LB_ENDPOINT"
+        
+        # Verify ALB and Target Groups
+        echo "🔍 Verifying ALB configuration..."
+        ALB_ARN=$(aws elbv2 describe-load-balancers --region "$AWS_REGION" --query "LoadBalancers[?DNSName=='$LB_ENDPOINT'].LoadBalancerArn" --output text 2>/dev/null || echo "")
+        
+        if [ -n "$ALB_ARN" ] && [ "$ALB_ARN" != "None" ]; then
+            echo "✅ ALB found: $(basename "$ALB_ARN")"
+            
+            # Check target groups
+            TARGET_GROUPS=$(aws elbv2 describe-target-groups --load-balancer-arn "$ALB_ARN" --region "$AWS_REGION" --query "TargetGroups[].TargetGroupArn" --output text 2>/dev/null || echo "")
+            if [ -n "$TARGET_GROUPS" ]; then
+                echo "✅ Target Groups created:"
+                for TG in $TARGET_GROUPS; do
+                    TG_NAME=$(aws elbv2 describe-target-groups --target-group-arns "$TG" --region "$AWS_REGION" --query "TargetGroups[0].TargetGroupName" --output text 2>/dev/null || echo "unknown")
+                    echo "   - $TG_NAME"
+                done
+                
+                # Check listeners
+                LISTENERS=$(aws elbv2 describe-listeners --load-balancer-arn "$ALB_ARN" --region "$AWS_REGION" --query "Listeners[].Port" --output text 2>/dev/null || echo "")
+                if [ -n "$LISTENERS" ]; then
+                    echo "✅ ALB Listeners on ports: $LISTENERS"
+                else
+                    echo "⚠️ No listeners found on ALB"
+                fi
+            else
+                echo "⚠️ No target groups found for ALB"
+            fi
+        else
+            echo "⚠️ ALB not found for endpoint: $LB_ENDPOINT"
+        fi
         break
     fi
     
@@ -356,5 +411,16 @@ echo ""
 echo "📋 Next Steps:"
 echo "   1. Verify pods are running: kubectl get pods -n $NAMESPACE"
 echo "   2. Check LoadBalancer status: kubectl get svc -n $NAMESPACE"
-echo "   3. Test connectivity: curl -k https://$LIVEKIT_DOMAIN"
+echo "   3. Test ALB connectivity: curl -k https://$LIVEKIT_DOMAIN"
 echo "   4. Check LiveKit logs: kubectl logs -n $NAMESPACE -l app.kubernetes.io/name=livekit-server"
+echo "   5. Verify ALB target groups: aws elbv2 describe-target-groups --region $AWS_REGION"
+echo ""
+echo "📋 ALB Configuration:"
+if [ -n "$LB_ENDPOINT" ]; then
+    echo "   🌐 ALB Endpoint: $LB_ENDPOINT"
+    echo "   🌐 Custom Domain: https://$LIVEKIT_DOMAIN (via DNS)"
+    echo "   🔒 SSL Certificate: Configured with ACM"
+    echo "   🎯 Target Groups: Should point to LiveKit service on port 7880"
+else
+    echo "   ⚠️ ALB endpoint not available yet"
+fi
