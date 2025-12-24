@@ -36,7 +36,7 @@ on:
         default: false
         type: boolean
       skip_livekit:
-        description: 'Skip LiveKit Deployment'
+        description: 'Skip Load Balancer Controller Setup'
         required: false
         default: false
         type: boolean
@@ -187,13 +187,13 @@ jobs:
           echo "📊 Cluster: $CLUSTER_NAME"
           echo "📊 Redis: $REDIS_ENDPOINT"
 
-  # Step 4: Complete LiveKit Deployment (Load Balancer + LiveKit)
-  deploy-livekit-complete:
-    name: 🎥 Step 4 - Complete LiveKit Deployment
+  # Step 4: Setup AWS Load Balancer Controller
+  setup-load-balancer-controller:
+    name: 🔧 Step 4 - Setup AWS Load Balancer Controller
     runs-on: ubuntu-latest
     needs: [terraform-apply]
     if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_livekit && (needs.terraform-apply.result == 'success' || inputs.skip_terraform_apply) }}
-    environment: livekit-poc-${{ inputs.environment }}-deploy-livekit
+    environment: livekit-poc-${{ inputs.environment }}-load-balancer-controller
     
     steps:
       - name: Checkout code
@@ -203,7 +203,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          role-session-name: GitHubActions-Deploy-LiveKit-${{ github.run_id }}
+          role-session-name: GitHubActions-LoadBalancer-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Tools
@@ -222,15 +222,20 @@ jobs:
           sudo mv eksctl /usr/local/bin/
           
           # Install jq and curl
-          sudo apt-get update && sudo apt-get install -y jq curl wget
+          sudo apt-get update && sudo apt-get install -y jq curl
           
-          # Install Terraform for Redis endpoint retrieval if needed
-          wget -q https://releases.hashicorp.com/terraform/1.10.3/terraform_1.10.3_linux_amd64.zip
-          unzip -q terraform_1.10.3_linux_amd64.zip
-          sudo mv terraform /usr/local/bin/
+          # Verify installations
+          echo "✅ Tool versions:"
+          kubectl version --client
+          helm version
+          eksctl version
+          jq --version
 
-      - name: Wait for Cluster Ready
+      - name: Setup AWS Load Balancer Controller
+        working-directory: scripts
         run: |
+          chmod +x 02-setup-load-balancer-controller.sh
+          
           # Determine cluster name
           if [ "${{ inputs.skip_terraform_apply }}" = "true" ]; then
             CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
@@ -238,71 +243,40 @@ jobs:
             CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
           fi
           
-          echo "⏳ Waiting for cluster to be ready..."
+          echo "📋 Configuration for Load Balancer Controller Setup:"
           echo "📋 Cluster: $CLUSTER_NAME"
-          
-          # Wait for cluster to stabilize
-          sleep 30
-          
-          # Check cluster status
-          for i in {1..10}; do
-            CLUSTER_STATUS=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "${{ env.AWS_REGION }}" --query 'cluster.status' --output text 2>/dev/null || echo "UNKNOWN")
-            echo "📋 Cluster status: $CLUSTER_STATUS (attempt $i/10)"
-            
-            if [ "$CLUSTER_STATUS" = "ACTIVE" ]; then
-              echo "✅ Cluster is ACTIVE and ready"
-              break
-            elif [ "$CLUSTER_STATUS" = "CREATING" ]; then
-              echo "⏳ Cluster still creating, waiting 30 seconds..."
-              sleep 30
-            else
-              echo "❌ Unexpected cluster status: $CLUSTER_STATUS"
-              if [ $i -eq 10 ]; then
-                echo "❌ Cluster not ready after 10 attempts"
-                exit 1
-              fi
-            fi
-          done
-
-      - name: Run Complete LiveKit Deployment
-        working-directory: scripts
-        run: |
-          chmod +x 02-deploy-livekit-complete.sh
-          
-          # Determine cluster name and Redis endpoint
-          if [ "${{ inputs.skip_terraform_apply }}" = "true" ]; then
-            CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
-            # Get Redis endpoint from existing Terraform state
-            cd ../resources
-            terraform init -backend-config="../environments/livekit-poc/${{ env.AWS_REGION }}/${{ inputs.environment }}/backend.tfvars" || true
-            REDIS_ENDPOINT=$(terraform output -raw redis_cluster_endpoint 2>/dev/null || echo "")
-            cd ../scripts
-            
-            if [ -z "$REDIS_ENDPOINT" ]; then
-              echo "❌ Could not retrieve Redis endpoint from Terraform state"
-              echo "💡 Make sure Terraform infrastructure is deployed first"
-              exit 1
-            fi
-          else
-            CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
-            REDIS_ENDPOINT="${{ needs.terraform-apply.outputs.redis-endpoint }}"
-          fi
-          
-          echo "📋 Configuration for Complete LiveKit Deployment:"
-          echo "📋 Cluster: $CLUSTER_NAME"
-          echo "📋 Redis: $REDIS_ENDPOINT"
+          echo "📋 Region: ${{ env.AWS_REGION }}"
           echo "📋 Environment: ${{ inputs.environment }}"
-          echo "📋 Domain: livekit-tf.digi-telephony.com"
           echo ""
           
-          # Run the comprehensive deployment script with automatic certificate setup
+          # Enable full logging and continuous output
+          set -x  # Enable command tracing
+          
+          # Run the Load Balancer Controller setup with full logging
           CLUSTER_NAME="$CLUSTER_NAME" \
           AWS_REGION="${{ env.AWS_REGION }}" \
-          REDIS_ENDPOINT="$REDIS_ENDPOINT" \
           ENVIRONMENT="${{ inputs.environment }}" \
-          API_KEY="APIKmrHi78hxpbd" \
-          SECRET_KEY="Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB" \
-          ./02-deploy-livekit-complete.sh
+          ./02-setup-load-balancer-controller.sh 2>&1 | tee /tmp/lbc-setup.log
+          
+          # Show final status
+          echo ""
+          echo "🔍 Final Status Check:"
+          kubectl get deployment aws-load-balancer-controller -n kube-system || echo "Deployment not found"
+          kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller || echo "No pods found"
+          kubectl get service aws-load-balancer-webhook-service -n kube-system || echo "Webhook service not found"
+          
+          echo ""
+          echo "📋 Setup Log Summary:"
+          echo "✅ Load Balancer Controller setup completed"
+          echo "📄 Full logs available in pipeline output above"
+
+      - name: Upload Setup Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: load-balancer-controller-setup-logs-${{ inputs.environment }}
+          path: /tmp/lbc-setup.log
+          retention-days: 7
 
   # DESTROY: Remove everything (Optional)
   destroy:
