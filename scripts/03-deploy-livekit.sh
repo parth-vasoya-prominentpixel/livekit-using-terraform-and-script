@@ -20,9 +20,9 @@ RELEASE_NAME="livekit"
 REDIS_ENDPOINT="${REDIS_ENDPOINT:-clustercfg.livekit-redis.x4ncn3.use1.cache.amazonaws.com:6379}"
 
 # Domains and Certificate
-LIVEKIT_DOMAIN="livekit-eks-tf.digi-telephony.com"
-TURN_DOMAIN="turn-eks-tf.digi-telephony.com"
-CERT_ARN="arn:aws:acm:us-east-1:918595516608:certificate/4523a895-7899-41a3-8589-2a5baed3b420"
+LIVEKIT_DOMAIN="livekit-eks.digi-telephony.com"
+TURN_DOMAIN="turn-eks.livekit.digi-telephony.com"
+CERT_ARN="arn:aws:acm:us-east-1:918595516608:certificate/388e3ff7-9763-4772-bfef-56cf64fcc414"
 
 # API Keys
 API_KEY="APIKmrHi78hxpbd"
@@ -45,10 +45,18 @@ aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME" >/dev/nu
 echo "✅ AWS and cluster verified"
 
 # Verify Load Balancer Controller
+echo ""
+echo "🔍 Verifying AWS Load Balancer Controller..."
 LB_CONTROLLER_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | wc -l)
 if [ "$LB_CONTROLLER_PODS" -gt 0 ]; then
-    READY_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | grep "Running" | wc -l)
+    READY_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | grep "1/1.*Running" | wc -l)
     echo "✅ Load Balancer Controller is ready ($READY_PODS/$LB_CONTROLLER_PODS pods)"
+    
+    # Show controller details
+    echo "📋 Controller pods:"
+    kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers | while read line; do
+        echo "   $line"
+    done
 else
     echo "❌ AWS Load Balancer Controller not found"
     echo "💡 Please run the load balancer setup script first"
@@ -64,8 +72,20 @@ echo "✅ Namespace '$NAMESPACE' ready"
 # Clean up existing deployment
 echo ""
 echo "🔄 Cleaning up existing LiveKit deployment..."
-helm uninstall "$RELEASE_NAME" -n "$NAMESPACE" --wait 2>/dev/null || echo "   No existing deployment found"
-sleep 5
+# Check if livekit namespace exists
+if kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
+    echo "   Found existing namespace: $NAMESPACE"
+    # Check for existing LiveKit deployment
+    if helm list -n "$NAMESPACE" -q | grep -q "$RELEASE_NAME"; then
+        echo "   Removing existing LiveKit deployment..."
+        helm uninstall "$RELEASE_NAME" -n "$NAMESPACE" --wait 2>/dev/null || echo "   Failed to uninstall, continuing..."
+        sleep 10
+    else
+        echo "   No existing LiveKit deployment found"
+    fi
+else
+    echo "   No existing namespace found"
+fi
 
 # Step 2: Add Helm Repository (Official Documentation)
 echo ""
@@ -101,9 +121,9 @@ echo "🚀 Step 2: Deploy LiveKit with Custom Values"
 echo "============================================="
 echo "🔧 Creating LiveKit values file..."
 
-# Create values file based on your configuration
+# Create values file based on your exact configuration
 cat > /tmp/livekit-values.yaml << EOF
-# LiveKit Configuration - Based on Official Documentation
+# LiveKit Configuration - Exact match to your specification
 livekit:
   domain: $LIVEKIT_DOMAIN
   rtc:
@@ -151,29 +171,6 @@ turn:
 # Load Balancer Configuration (ALB)
 loadBalancer:
   type: alb
-
-# Ingress Configuration for ALB
-ingress:
-  enabled: true
-  className: "alb"
-  annotations:
-    kubernetes.io/ingress.class: alb
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/subnets: $SUBNET_IDS
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
-    alb.ingress.kubernetes.io/certificate-arn: $CERT_ARN
-    alb.ingress.kubernetes.io/ssl-redirect: '443'
-    alb.ingress.kubernetes.io/tags: Environment=$NAMESPACE,Application=livekit
-  hosts:
-    - host: $LIVEKIT_DOMAIN
-      paths:
-        - path: /
-          pathType: Prefix
-  tls:
-    - hosts:
-      - $LIVEKIT_DOMAIN
-      secretName: livekit-tls
 
 # TLS Configuration
 tls:
@@ -268,20 +265,35 @@ echo "📊 Step 3: Verify Deployment"
 echo "============================"
 echo "📋 Checking pods with label: app.kubernetes.io/name=livekit"
 
-kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit || true
+# Wait a moment for pods to be created
+sleep 15
+
+# Check for LiveKit pods
+LIVEKIT_PODS=$(kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit --no-headers 2>/dev/null | wc -l)
+if [ "$LIVEKIT_PODS" -gt 0 ]; then
+    echo "✅ Found $LIVEKIT_PODS LiveKit pods"
+    kubectl get pods -n "$NAMESPACE" -l app.kubernetes.io/name=livekit
+else
+    echo "⚠️ No pods found with app.kubernetes.io/name=livekit, checking all pods in namespace..."
+    kubectl get pods -n "$NAMESPACE" || echo "No pods found in namespace $NAMESPACE"
+fi
 
 echo ""
-echo "📋 All resources:"
+echo "📋 All resources in namespace $NAMESPACE:"
 echo "📋 Pods:"
-kubectl get pods -n "$NAMESPACE" || true
+kubectl get pods -n "$NAMESPACE" || echo "No pods found"
 
 echo ""
 echo "📋 Services:"
-kubectl get svc -n "$NAMESPACE" || true
+kubectl get svc -n "$NAMESPACE" || echo "No services found"
 
 echo ""
 echo "📋 Ingress:"
-kubectl get ingress -n "$NAMESPACE" || true
+kubectl get ingress -n "$NAMESPACE" || echo "No ingress found"
+
+echo ""
+echo "📋 Deployments:"
+kubectl get deployments -n "$NAMESPACE" || echo "No deployments found"
 
 # Clean up temporary files
 rm -f /tmp/livekit-values.yaml
