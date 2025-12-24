@@ -239,12 +239,12 @@ turn:
 ingress:
   enabled: false
 
-# Service configuration - CORRECT structure for LiveKit Helm chart
+# Service configuration - CORRECT ALB configuration for LiveKit Helm chart
 service:
   type: LoadBalancer
   annotations:
-    # ALB Configuration
-    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    # ALB Configuration (FIXED - use "alb" not "external")
+    service.beta.kubernetes.io/aws-load-balancer-type: "alb"
     service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
     # SSL Configuration
     service.beta.kubernetes.io/aws-load-balancer-ssl-cert: $CERT_ARN
@@ -266,43 +266,7 @@ serviceMonitor:
 # If the above doesn't work, we'll create a separate service
 EOF
 
-# Create additional LoadBalancer service manifest
-cat > /tmp/livekit-alb-service.yaml << EOF
-apiVersion: v1
-kind: Service
-metadata:
-  name: livekit-alb-service
-  namespace: livekit
-  annotations:
-    # ALB Configuration
-    service.beta.kubernetes.io/aws-load-balancer-type: "external"
-    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
-    # SSL Configuration
-    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: $CERT_ARN
-    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
-    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
-    # Security Groups
-    service.beta.kubernetes.io/aws-load-balancer-security-groups: $ALB_SECURITY_GROUP
-    # Health Check
-    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: "/"
-    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "7880"
-    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "http"
-    # DNS
-    external-dns.alpha.kubernetes.io/hostname: $LIVEKIT_DOMAIN
-spec:
-  type: LoadBalancer
-  selector:
-    app.kubernetes.io/name: livekit-server
-    app.kubernetes.io/instance: livekit
-  ports:
-  - name: http
-    port: 80
-    targetPort: 7880
-    protocol: TCP
-  - name: https
-    port: 443
-    targetPort: 7880
-    protocol: TCP
+# Create additional LoadBalancer service manifest (ALB)
 EOF
 
 echo "✅ LiveKit values file created"
@@ -388,11 +352,133 @@ fi
 # Create separate ALB service if the Helm chart service is ClusterIP
 echo ""
 echo "🔧 Creating separate ALB LoadBalancer service..."
+
+# First, let's check the actual pod labels to ensure correct targeting
+echo "🔍 Detecting LiveKit pod labels for correct targeting..."
+LIVEKIT_POD=$(kubectl get pods -n "$NAMESPACE" --no-headers -o custom-columns=":metadata.name" | grep livekit | head -1 2>/dev/null || echo "")
+
+if [ -n "$LIVEKIT_POD" ]; then
+    echo "✅ Found LiveKit pod: $LIVEKIT_POD"
+    
+    # Get the actual labels from the pod
+    APP_NAME=$(kubectl get pod "$LIVEKIT_POD" -n "$NAMESPACE" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/name}' 2>/dev/null || echo "")
+    APP_INSTANCE=$(kubectl get pod "$LIVEKIT_POD" -n "$NAMESPACE" -o jsonpath='{.metadata.labels.app\.kubernetes\.io/instance}' 2>/dev/null || echo "")
+    APP_LABEL=$(kubectl get pod "$LIVEKIT_POD" -n "$NAMESPACE" -o jsonpath='{.metadata.labels.app}' 2>/dev/null || echo "")
+    
+    echo "📋 Detected labels:"
+    echo "   app.kubernetes.io/name: $APP_NAME"
+    echo "   app.kubernetes.io/instance: $APP_INSTANCE" 
+    echo "   app: $APP_LABEL"
+    
+    # Create service with the correct selector
+    cat > /tmp/livekit-alb-service.yaml << EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: livekit-alb-service
+  namespace: livekit
+  annotations:
+    # ALB Configuration
+    service.beta.kubernetes.io/aws-load-balancer-type: "alb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    # SSL Configuration
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: $CERT_ARN
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
+    # Security Groups
+    service.beta.kubernetes.io/aws-load-balancer-security-groups: $ALB_SECURITY_GROUP
+    # Health Check
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: "/"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "7880"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "http"
+    # DNS
+    external-dns.alpha.kubernetes.io/hostname: $LIVEKIT_DOMAIN
+spec:
+  type: LoadBalancer
+  selector:
+EOF
+
+    # Add the correct selector based on what we found
+    if [ -n "$APP_NAME" ] && [ -n "$APP_INSTANCE" ]; then
+        echo "    app.kubernetes.io/name: $APP_NAME" >> /tmp/livekit-alb-service.yaml
+        echo "    app.kubernetes.io/instance: $APP_INSTANCE" >> /tmp/livekit-alb-service.yaml
+        echo "✅ Using app.kubernetes.io labels for targeting"
+    elif [ -n "$APP_LABEL" ]; then
+        echo "    app: $APP_LABEL" >> /tmp/livekit-alb-service.yaml
+        echo "✅ Using app label for targeting"
+    else
+        echo "    app: livekit-livekit-server" >> /tmp/livekit-alb-service.yaml
+        echo "⚠️ Using fallback selector"
+    fi
+
+    # Add ports
+    cat >> /tmp/livekit-alb-service.yaml << EOF
+  ports:
+  - name: http
+    port: 80
+    targetPort: 7880
+    protocol: TCP
+  - name: https
+    port: 443
+    targetPort: 7880
+    protocol: TCP
+EOF
+
+else
+    echo "⚠️ No LiveKit pod found, using default selectors"
+    # Create service with default selector
+    cat > /tmp/livekit-alb-service.yaml << EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: livekit-alb-service
+  namespace: livekit
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "alb"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: $CERT_ARN
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
+    service.beta.kubernetes.io/aws-load-balancer-security-groups: $ALB_SECURITY_GROUP
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: "/"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "7880"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "http"
+    external-dns.alpha.kubernetes.io/hostname: $LIVEKIT_DOMAIN
+spec:
+  type: LoadBalancer
+  selector:
+    app: livekit-livekit-server
+  ports:
+  - name: http
+    port: 80
+    targetPort: 7880
+    protocol: TCP
+  - name: https
+    port: 443
+    targetPort: 7880
+    protocol: TCP
+EOF
+fi
+
 kubectl apply -f /tmp/livekit-alb-service.yaml
 
 echo "✅ ALB LoadBalancer service created"
 echo "📋 Checking service status..."
 kubectl get svc -n "$NAMESPACE" livekit-alb-service
+
+# Verify the service is targeting the right pods
+echo ""
+echo "🔍 Verifying service endpoints..."
+kubectl get endpoints -n "$NAMESPACE" livekit-alb-service
+
+# Show which pods are being targeted
+echo ""
+echo "🔍 Pods targeted by ALB service:"
+if [ -n "$LIVEKIT_POD" ]; then
+    kubectl get pods -n "$NAMESPACE" "$LIVEKIT_POD" -o wide
+else
+    kubectl get pods -n "$NAMESPACE" -l app=livekit-livekit-server -o wide 2>/dev/null || kubectl get pods -n "$NAMESPACE" --show-labels | grep livekit
+fi
 
 # Step 6: Wait for LoadBalancer Service to be ready and verify ALB setup
 echo ""
