@@ -20,9 +20,9 @@ RELEASE_NAME="livekit"
 REDIS_ENDPOINT="${REDIS_ENDPOINT:-clustercfg.livekit-redis.x4ncn3.use1.cache.amazonaws.com:6379}"
 
 # Domains and Certificate
-LIVEKIT_DOMAIN="livekit-eks.digi-telephony.com"
-TURN_DOMAIN="turn-eks.livekit.digi-telephony.com"
-CERT_ARN="arn:aws:acm:us-east-1:918595516608:certificate/388e3ff7-9763-4772-bfef-56cf64fcc414"
+LIVEKIT_DOMAIN="livekit-eks-tf.digi-telephony.com"
+TURN_DOMAIN="turn-eks-tf.digi-telephony.com"
+CERT_ARN="arn:aws:acm:us-east-1:918595516608:certificate/4523a895-7899-41a3-8589-2a5baed3b420"
 
 # API Keys
 API_KEY="APIKmrHi78hxpbd"
@@ -121,12 +121,13 @@ echo "🚀 Step 2: Deploy LiveKit with Custom Values"
 echo "============================================="
 echo "🔧 Creating LiveKit values file..."
 
-# Create values file based on your exact configuration and official documentation
+# Create values file based on official example + your configuration
 cat > /tmp/livekit-values.yaml << EOF
-# LiveKit Server Configuration - Following Official Documentation
-# Based on: https://docs.livekit.io/transport/self-hosting/kubernetes/
+# LiveKit Server Configuration - Based on Official Example
+# Refer to https://docs.livekit.io/deploy/kubernetes/ for instructions
 
-# LiveKit Server Configuration
+replicaCount: 2
+
 livekit:
   domain: $LIVEKIT_DOMAIN
   rtc:
@@ -143,16 +144,38 @@ livekit:
     enabled: true
     port: 6789
 
-# Resource Configuration
+turn:
+  enabled: true
+  domain: $TURN_DOMAIN
+  tls_port: 3478
+  udp_port: 3478
+
+loadBalancer:
+  # With ALB, TLS certificates are managed by ACM
+  # Ensure you have issued a certificate for your domain in ACM
+  type: alb
+
+tls:
+  - hosts:
+    - $LIVEKIT_DOMAIN
+    certificateArn: $CERT_ARN
+
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 60
+
+# Resources are set assuming a 8 core instance (adjusted for your specs)
 resources:
-  requests:
-    cpu: 500m
-    memory: 512Mi
   limits:
     cpu: 2000m
     memory: 2Gi
+  requests:
+    cpu: 500m
+    memory: 512Mi
 
-# Pod Anti-Affinity for High Availability (one pod per node as per docs)
+# Pod Anti-Affinity for High Availability
 affinity:
   podAntiAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
@@ -163,38 +186,6 @@ affinity:
           values:
           - livekit-livekit-server
       topologyKey: "kubernetes.io/hostname"
-
-# TURN Server Configuration
-turn:
-  enabled: true
-  domain: $TURN_DOMAIN
-  tls_port: 3478
-  udp_port: 3478
-
-# Service Configuration
-service:
-  type: ClusterIP
-  port: 7880
-
-# Ingress Configuration for AWS ALB (Simplified)
-ingress:
-  enabled: true
-  className: alb
-  annotations:
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/subnets: $SUBNET_IDS
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
-    alb.ingress.kubernetes.io/certificate-arn: $CERT_ARN
-    alb.ingress.kubernetes.io/ssl-redirect: '443'
-  hosts:
-  - $LIVEKIT_DOMAIN
-  tls:
-  - hosts:
-    - $LIVEKIT_DOMAIN
-
-# Graceful shutdown configuration (as per documentation)
-terminationGracePeriodSeconds: 18000  # 5 hours as recommended in docs
 EOF
 
 echo "✅ LiveKit values file created"
