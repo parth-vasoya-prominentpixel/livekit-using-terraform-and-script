@@ -234,7 +234,7 @@ jobs:
       - name: Setup AWS Load Balancer Controller
         working-directory: scripts
         run: |
-          chmod +x 02-setup-load-balancer-controller.sh
+          chmod +x 01-setup-load-balancer-controller.sh
           
           # Determine cluster name
           if [ "${{ inputs.skip_terraform_apply }}" = "true" ]; then
@@ -256,7 +256,7 @@ jobs:
           CLUSTER_NAME="$CLUSTER_NAME" \
           AWS_REGION="${{ env.AWS_REGION }}" \
           ENVIRONMENT="${{ inputs.environment }}" \
-          ./02-setup-load-balancer-controller.sh 2>&1 | tee /tmp/lbc-setup.log
+          ./01-setup-load-balancer-controller.sh 2>&1 | tee /tmp/lbc-setup.log
           
           # Show final status
           echo ""
