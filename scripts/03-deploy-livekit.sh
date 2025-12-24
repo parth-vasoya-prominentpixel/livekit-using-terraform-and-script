@@ -168,7 +168,7 @@ echo "🚀 Step 3: Deploy LiveKit with Custom Values"
 echo "============================================="
 echo "🔧 Creating LiveKit values file..."
 
-# Create LiveKit values based on user specification (FIXED ALB SERVICE CONFIGURATION)
+# Create LiveKit values based on user specification (CORRECT HELM STRUCTURE)
 cat > /tmp/livekit-values.yaml << EOF
 # LiveKit server configuration - Exact user specification
 livekit:
@@ -221,7 +221,7 @@ turn:
 ingress:
   enabled: false
 
-# Service configuration - ALB LoadBalancer (WORKING CONFIGURATION)
+# Service configuration - CORRECT structure for LiveKit Helm chart
 service:
   type: LoadBalancer
   annotations:
@@ -240,6 +240,42 @@ service:
     service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "http"
     # DNS Configuration
     external-dns.alpha.kubernetes.io/hostname: $LIVEKIT_DOMAIN
+
+# Alternative approach - Create separate LoadBalancer service
+serviceMonitor:
+  enabled: false
+
+# If the above doesn't work, we'll create a separate service
+EOF
+
+# Create additional LoadBalancer service manifest
+cat > /tmp/livekit-alb-service.yaml << EOF
+apiVersion: v1
+kind: Service
+metadata:
+  name: livekit-alb-service
+  namespace: livekit
+  annotations:
+    # ALB Configuration
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    # SSL Configuration
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: $CERT_ARN
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
+    # Security Groups
+    service.beta.kubernetes.io/aws-load-balancer-security-groups: $ALB_SECURITY_GROUP
+    # Health Check
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: "/"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "7880"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "http"
+    # DNS
+    external-dns.alpha.kubernetes.io/hostname: $LIVEKIT_DOMAIN
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: livekit-server
+    app.kubernetes.io/instance: livekit
   ports:
   - name: http
     port: 80
@@ -331,6 +367,15 @@ else
     exit 1
 fi
 
+# Create separate ALB service if the Helm chart service is ClusterIP
+echo ""
+echo "🔧 Creating separate ALB LoadBalancer service..."
+kubectl apply -f /tmp/livekit-alb-service.yaml
+
+echo "✅ ALB LoadBalancer service created"
+echo "📋 Checking service status..."
+kubectl get svc -n "$NAMESPACE" livekit-alb-service
+
 # Step 6: Wait for LoadBalancer Service to be ready and verify ALB setup
 echo ""
 echo "⏳ Waiting for LoadBalancer Service and ALB setup..."
@@ -338,7 +383,13 @@ MAX_ATTEMPTS=30
 ATTEMPT=1
 
 while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-    LB_ENDPOINT=$(kubectl get svc -n "$NAMESPACE" "$RELEASE_NAME-livekit-server" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+    # Check our custom ALB service first
+    LB_ENDPOINT=$(kubectl get svc -n "$NAMESPACE" "livekit-alb-service" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+    
+    # If custom service doesn't have endpoint, check the Helm chart service
+    if [ -z "$LB_ENDPOINT" ] || [ "$LB_ENDPOINT" = "null" ]; then
+        LB_ENDPOINT=$(kubectl get svc -n "$NAMESPACE" "$RELEASE_NAME-livekit-server" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+    fi
     
     if [ -n "$LB_ENDPOINT" ] && [ "$LB_ENDPOINT" != "null" ]; then
         echo "✅ LoadBalancer ready: $LB_ENDPOINT"
@@ -356,7 +407,8 @@ while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
                 echo "✅ Target Groups created:"
                 for TG in $TARGET_GROUPS; do
                     TG_NAME=$(aws elbv2 describe-target-groups --target-group-arns "$TG" --region "$AWS_REGION" --query "TargetGroups[0].TargetGroupName" --output text 2>/dev/null || echo "unknown")
-                    echo "   - $TG_NAME"
+                    TG_HEALTH=$(aws elbv2 describe-target-health --target-group-arn "$TG" --region "$AWS_REGION" --query "TargetHealthDescriptions[0].TargetHealth.State" --output text 2>/dev/null || echo "unknown")
+                    echo "   - $TG_NAME (Health: $TG_HEALTH)"
                 done
                 
                 # Check listeners
@@ -378,7 +430,7 @@ while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
     if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
         echo "⚠️ LoadBalancer not ready after $MAX_ATTEMPTS attempts"
         echo "📋 Checking service status..."
-        kubectl get svc -n "$NAMESPACE" "$RELEASE_NAME-livekit-server" -o yaml || true
+        kubectl get svc -n "$NAMESPACE" || true
         break
     fi
     
@@ -420,7 +472,7 @@ echo "📋 Deployments:"
 kubectl get deployments -n "$NAMESPACE" || echo "No deployments found"
 
 # Clean up temporary files
-rm -f /tmp/livekit-values.yaml /tmp/livekit-template.yaml
+rm -f /tmp/livekit-values.yaml /tmp/livekit-template.yaml /tmp/livekit-alb-service.yaml
 
 echo ""
 echo "🎉 LiveKit Deployment Completed!"
