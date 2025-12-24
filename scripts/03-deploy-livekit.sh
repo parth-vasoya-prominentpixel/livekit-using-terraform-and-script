@@ -266,9 +266,6 @@ serviceMonitor:
 # If the above doesn't work, we'll create a separate service
 EOF
 
-# Create additional LoadBalancer service manifest (ALB)
-EOF
-
 echo "✅ LiveKit values file created"
 
 # Show configuration summary
@@ -387,11 +384,18 @@ metadata:
     service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
     # Security Groups
     service.beta.kubernetes.io/aws-load-balancer-security-groups: $ALB_SECURITY_GROUP
-    # Health Check
+    # Health Check Configuration - Ensure proper targeting
     service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: "/"
     service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "7880"
     service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "http"
-    # DNS
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-interval-seconds: "30"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-timeout-seconds: "5"
+    service.beta.kubernetes.io/aws-load-balancer-healthy-threshold-count: "2"
+    service.beta.kubernetes.io/aws-load-balancer-unhealthy-threshold-count: "3"
+    # Target Group Configuration - Ensure it points to LiveKit
+    service.beta.kubernetes.io/aws-load-balancer-target-type: "ip"
+    service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: "deregistration_delay.timeout_seconds=30"
+    # DNS Configuration
     external-dns.alpha.kubernetes.io/hostname: $LIVEKIT_DOMAIN
 spec:
   type: LoadBalancer
@@ -434,15 +438,27 @@ metadata:
   name: livekit-alb-service
   namespace: livekit
   annotations:
+    # ALB Configuration
     service.beta.kubernetes.io/aws-load-balancer-type: "alb"
     service.beta.kubernetes.io/aws-load-balancer-scheme: "internet-facing"
+    # SSL Configuration
     service.beta.kubernetes.io/aws-load-balancer-ssl-cert: $CERT_ARN
     service.beta.kubernetes.io/aws-load-balancer-ssl-ports: "443"
     service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "http"
+    # Security Groups
     service.beta.kubernetes.io/aws-load-balancer-security-groups: $ALB_SECURITY_GROUP
+    # Health Check Configuration - Ensure proper targeting
     service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: "/"
     service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "7880"
     service.beta.kubernetes.io/aws-load-balancer-healthcheck-protocol: "http"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-interval-seconds: "30"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-timeout-seconds: "5"
+    service.beta.kubernetes.io/aws-load-balancer-healthy-threshold-count: "2"
+    service.beta.kubernetes.io/aws-load-balancer-unhealthy-threshold-count: "3"
+    # Target Group Configuration - Ensure it points to LiveKit
+    service.beta.kubernetes.io/aws-load-balancer-target-type: "ip"
+    service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: "deregistration_delay.timeout_seconds=30"
+    # DNS Configuration
     external-dns.alpha.kubernetes.io/hostname: $LIVEKIT_DOMAIN
 spec:
   type: LoadBalancer
@@ -478,6 +494,18 @@ if [ -n "$LIVEKIT_POD" ]; then
     kubectl get pods -n "$NAMESPACE" "$LIVEKIT_POD" -o wide
 else
     kubectl get pods -n "$NAMESPACE" -l app=livekit-livekit-server -o wide 2>/dev/null || kubectl get pods -n "$NAMESPACE" --show-labels | grep livekit
+fi
+
+# Additional verification - Check if endpoints are populated
+echo ""
+echo "🔍 Verifying ALB target registration..."
+ENDPOINT_IPS=$(kubectl get endpoints -n "$NAMESPACE" livekit-alb-service -o jsonpath='{.subsets[*].addresses[*].ip}' 2>/dev/null || echo "")
+if [ -n "$ENDPOINT_IPS" ]; then
+    echo "✅ ALB service has endpoints: $ENDPOINT_IPS"
+    echo "✅ Target group will register these IPs on port 7880"
+else
+    echo "⚠️ No endpoints found - checking service selector..."
+    kubectl describe svc -n "$NAMESPACE" livekit-alb-service
 fi
 
 # Step 6: Wait for LoadBalancer Service to be ready and verify ALB setup
