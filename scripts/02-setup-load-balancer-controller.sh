@@ -212,43 +212,75 @@ echo ""
 echo "📋 Step 3: Creating IAM service account..."
 
 # Check if our specific service account exists
-if kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" >/dev/null 2>&1; then
+SA_EXISTS=$(kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" >/dev/null 2>&1 && echo "true" || echo "false")
+
+if [[ "$SA_EXISTS" == "true" ]]; then
+    echo "ℹ️  Service account '$SERVICE_ACCOUNT_NAME' already exists"
+    
     EXISTING_ROLE_ARN=$(kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null || echo "")
     
     if [[ -n "$EXISTING_ROLE_ARN" && "$EXISTING_ROLE_ARN" != "null" ]]; then
-        echo "✅ Service account already exists with IAM role: $EXISTING_ROLE_ARN"
+        echo "✅ Service account has IAM role: $EXISTING_ROLE_ARN"
         ROLE_ARN="$EXISTING_ROLE_ARN"
     else
         echo "⚠️  Service account exists but no IAM role annotation"
-        echo "   Recreating service account with proper IAM role..."
+        echo "🧹 Recreating service account with proper IAM role..."
         kubectl delete serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE"
         sleep 2
+        SA_EXISTS="false"
     fi
 fi
 
 # Create service account if it doesn't exist or needs IAM role
-if ! kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" >/dev/null 2>&1; then
+if [[ "$SA_EXISTS" == "false" ]]; then
     echo "🔄 Creating service account with IAM role using eksctl..."
+    echo "📋 Command: eksctl create iamserviceaccount --cluster=$CLUSTER_NAME --namespace=$LB_NAMESPACE --name=$SERVICE_ACCOUNT_NAME --role-name=$ROLE_NAME --attach-policy-arn=$POLICY_ARN --region=$AWS_REGION --override-existing-serviceaccounts --approve"
     
-    eksctl create iamserviceaccount \
-        --cluster="$CLUSTER_NAME" \
-        --namespace="$LB_NAMESPACE" \
-        --name="$SERVICE_ACCOUNT_NAME" \
-        --role-name="$ROLE_NAME" \
-        --attach-policy-arn="$POLICY_ARN" \
-        --region="$AWS_REGION" \
-        --override-existing-serviceaccounts \
-        --approve
-    
-    ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
-    echo "✅ Service account created with IAM role: $ROLE_ARN"
+    # Check if IAM role already exists (global resource)
+    if aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
+        echo "ℹ️  IAM role '$ROLE_NAME' already exists globally"
+        echo "🔄 Using existing role and creating service account..."
+        
+        # Create service account manually and annotate it
+        kubectl create serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" || true
+        kubectl annotate serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" \
+            eks.amazonaws.com/role-arn="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME" \
+            --overwrite
+        
+        ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+        echo "✅ Service account created with existing IAM role: $ROLE_ARN"
+    else
+        # Create new role and service account
+        eksctl create iamserviceaccount \
+            --cluster="$CLUSTER_NAME" \
+            --namespace="$LB_NAMESPACE" \
+            --name="$SERVICE_ACCOUNT_NAME" \
+            --role-name="$ROLE_NAME" \
+            --attach-policy-arn="$POLICY_ARN" \
+            --region="$AWS_REGION" \
+            --override-existing-serviceaccounts \
+            --approve
+        
+        ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE_NAME"
+        echo "✅ Service account created with new IAM role: $ROLE_ARN"
+    fi
 fi
 
-# Verify service account
+# Verify service account exists and has proper annotation
+echo "🔍 Verifying service account..."
 if kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" >/dev/null 2>&1; then
     echo "✅ Service account verified: $SERVICE_ACCOUNT_NAME"
     echo "🔍 Service account details:"
     kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" -o yaml | grep -A 3 annotations || echo "No annotations found"
+    
+    # Get the role ARN for verification
+    FINAL_ROLE_ARN=$(kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null || echo "")
+    if [[ -n "$FINAL_ROLE_ARN" && "$FINAL_ROLE_ARN" != "null" ]]; then
+        echo "✅ IAM role annotation verified: $FINAL_ROLE_ARN"
+    else
+        echo "❌ Service account missing IAM role annotation"
+        exit 1
+    fi
 else
     echo "❌ Service account verification failed"
     exit 1
@@ -269,18 +301,21 @@ echo "🔄 Installing AWS Load Balancer Controller..."
 echo "   Chart version: $HELM_CHART_VERSION"
 echo "   Service account: $SERVICE_ACCOUNT_NAME"
 echo "   Cluster: $CLUSTER_NAME"
+echo "   Region: $AWS_REGION"
 echo ""
 
 # Install using Helm as per AWS documentation
+echo "📋 Command: helm install aws-load-balancer-controller eks/aws-load-balancer-controller"
 helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
     -n "$LB_NAMESPACE" \
     --set clusterName="$CLUSTER_NAME" \
     --set serviceAccount.create=false \
     --set serviceAccount.name="$SERVICE_ACCOUNT_NAME" \
     --set region="$AWS_REGION" \
-    --version="$HELM_CHART_VERSION"
+    --version="$HELM_CHART_VERSION" \
+    --debug
 
-echo "✅ Helm installation completed"
+echo "✅ Helm installation command completed"
 echo ""
 
 # Step 6: Verify the installation
@@ -314,9 +349,15 @@ for i in {1..60}; do
     POD_COUNT=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | wc -l || echo "0")
     if [[ "$POD_COUNT" -gt 0 ]]; then
         echo "✅ Pods created ($POD_COUNT pods)"
+        echo "🔍 Pod status:"
+        kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller
         break
     else
         echo "   Waiting for pods to be created... (attempt $i/60)"
+        if [[ $((i % 10)) -eq 0 ]]; then
+            echo "🔍 Checking deployment status:"
+            kubectl get deployment aws-load-balancer-controller -n "$LB_NAMESPACE" 2>/dev/null || echo "Deployment not found yet"
+        fi
         sleep 5
     fi
 done
@@ -324,23 +365,59 @@ done
 # Check if pods were created
 POD_COUNT=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | wc -l || echo "0")
 if [[ "$POD_COUNT" -eq 0 ]]; then
-    echo "❌ No pods were created"
+    echo "❌ No pods were created after 5 minutes"
     echo "🔍 Checking deployment status:"
-    kubectl describe deployment aws-load-balancer-controller -n "$LB_NAMESPACE"
+    kubectl describe deployment aws-load-balancer-controller -n "$LB_NAMESPACE" 2>/dev/null || echo "Deployment not found"
     echo ""
     echo "🔍 Checking replica set:"
-    kubectl get replicaset -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller
+    kubectl get replicaset -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller 2>/dev/null || echo "No replica sets found"
     echo ""
     echo "🔍 Checking events:"
     kubectl get events -n "$LB_NAMESPACE" --sort-by='.lastTimestamp' | tail -15
+    echo ""
+    echo "🔍 Checking Helm release:"
+    helm list -n "$LB_NAMESPACE"
+    echo ""
+    echo "🔍 Checking service account:"
+    kubectl get serviceaccount "$SERVICE_ACCOUNT_NAME" -n "$LB_NAMESPACE" -o yaml
     exit 1
 fi
 
 # Wait for pods to be ready
 echo "⏳ Waiting for pods to be ready (up to 5 minutes)..."
-if kubectl wait --for=condition=ready --timeout=300s pods -l app.kubernetes.io/name=aws-load-balancer-controller -n "$LB_NAMESPACE" 2>/dev/null; then
-    echo "✅ Load Balancer Controller pods are ready"
-else
+PODS_READY="false"
+
+for i in {1..30}; do  # 30 * 10 seconds = 5 minutes
+    # Check pod status
+    RUNNING_PODS=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | grep -c "Running" || echo "0")
+    READY_PODS=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | grep -c "1/1" || echo "0")
+    TOTAL_PODS=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | wc -l || echo "0")
+    
+    echo "   Pod status check $i/30: $READY_PODS/$TOTAL_PODS ready, $RUNNING_PODS running"
+    
+    if [[ "$READY_PODS" -gt 0 ]]; then
+        echo "✅ Load Balancer Controller pods are ready ($READY_PODS/$TOTAL_PODS)"
+        PODS_READY="true"
+        break
+    fi
+    
+    # Show pod details every 5 attempts
+    if [[ $((i % 5)) -eq 0 ]]; then
+        echo "🔍 Current pod status:"
+        kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller
+        
+        # Check for issues
+        PENDING_PODS=$(kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --no-headers 2>/dev/null | grep -c "Pending" || echo "0")
+        if [[ "$PENDING_PODS" -gt 0 ]]; then
+            echo "⚠️  Found $PENDING_PODS pending pods, checking for issues..."
+            kubectl describe pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller | grep -A 10 "Events:" | tail -10
+        fi
+    fi
+    
+    sleep 10
+done
+
+if [[ "$PODS_READY" != "true" ]]; then
     echo "⚠️  Pods not ready within 5 minutes, checking status..."
     
     kubectl get pods -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller
@@ -350,6 +427,8 @@ else
     
     if [[ "$RUNNING_PODS" -gt 0 ]]; then
         echo "✅ Some pods are running ($RUNNING_PODS), continuing..."
+        echo "🔍 Pod logs for troubleshooting:"
+        kubectl logs -n "$LB_NAMESPACE" -l app.kubernetes.io/name=aws-load-balancer-controller --tail=10 2>/dev/null || echo "No logs available"
     else
         echo "❌ No pods are running, checking for issues..."
         echo "🔍 Pod details:"
