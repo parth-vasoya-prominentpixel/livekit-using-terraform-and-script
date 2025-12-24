@@ -274,8 +274,7 @@ jobs:
   deploy-livekit:
     name: 🎥 Step 5 - Deploy LiveKit
     runs-on: ubuntu-latest
-    needs: [terraform-apply, setup-load-balancer-controller]
-    if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_livekit && (needs.setup-load-balancer-controller.result == 'success' || (inputs.skip_terraform_apply && inputs.skip_livekit == false)) }}
+    if: ${{ inputs.action == 'deploy' && !inputs.skip_livekit }}
     environment: livekit-poc-${{ inputs.environment }}-deploy-livekit
     
     steps:
@@ -313,13 +312,9 @@ jobs:
           chmod +x 03-deploy-livekit.sh
           
           # Determine cluster name and Redis endpoint
-          if [ "${{ inputs.skip_terraform_apply }}" = "true" ]; then
-            CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
-            REDIS_ENDPOINT="clustercfg.livekit-redis.x4ncn3.use1.cache.amazonaws.com:6379"
-          else
-            CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
-            REDIS_ENDPOINT="${{ needs.terraform-apply.outputs.redis-endpoint }}"
-          fi
+          # Use hardcoded values since infrastructure is already deployed
+          CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
+          REDIS_ENDPOINT="clustercfg.livekit-redis.x4ncn3.use1.cache.amazonaws.com:6379"
           
           echo "📋 Configuration for LiveKit Deployment:"
           echo "📋 Cluster: $CLUSTER_NAME"
