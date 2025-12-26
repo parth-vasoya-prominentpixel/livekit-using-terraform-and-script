@@ -141,59 +141,65 @@ echo "⚙️ Creating values configuration..."
 
 cat > /tmp/livekit-values.yaml << EOF
 livekit:
-  domain: livekit-eks-tf.digi-telephony.com
+  domain: $LIVEKIT_DOMAIN
   rtc:
     use_external_ip: true
     port_range_start: 50000
     port_range_end: 60000
 
-redis:
-  address: $REDIS_ENDPOINT
+  redis:
+    address: $REDIS_ENDPOINT
 
-keys:
-  APIKmrHi78hxpbd: Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB
+  keys:
+    $API_KEY: $API_SECRET
 
-metrics:
-  enabled: true
-  prometheus:
+  metrics:
     enabled: true
-    port: 6789
+    prometheus:
+      enabled: true
+      port: 6789
 
-resources:
-  requests:
-    cpu: 500m
-    memory: 512Mi
-  limits:
-    cpu: 2000m
-    memory: 2Gi
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
 
-affinity:
-  podAntiAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-    - labelSelector:
-        matchExpressions:
-        - key: app
-          operator: In
-          values:
-          - livekit-livekit-server
-      topologyKey: "kubernetes.io/hostname"
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - livekit-livekit-server
+          topologyKey: "kubernetes.io/hostname"
 
 turn:
   enabled: true
-  domain: turn-eks-tf.digi-telephony.com
+  domain: $TURN_DOMAIN
   tls_port: 3478
   udp_port: 3478
 
+# Enable host networking for direct node IP access (REQUIRED for LiveKit WebRTC)
+hostNetwork: true
+
+# Load balancer configuration - creates ALB
 loadBalancer:
   type: alb
   tls:
-  - hosts:
-    - livekit-eks-tf.digi-telephony.com
-    certificateArn: arn:aws:acm:us-east-1:918595516608:certificate/4523a895-7899-41a3-8589-2a5baed3b420
+    - hosts:
+        - $LIVEKIT_DOMAIN
+      certificateArn: $CERTIFICATE_ARN
 
+# Service configuration - NodePort for host networking
 service:
   type: NodePort
 
+# Ingress configuration - this creates the ALB load balancer
 ingress:
   enabled: true
   ingressClassName: "alb"
@@ -202,20 +208,19 @@ ingress:
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
     alb.ingress.kubernetes.io/ssl-redirect: '443'
-    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:918595516608:certificate/4523a895-7899-41a3-8589-2a5baed3b420
+    alb.ingress.kubernetes.io/certificate-arn: $CERTIFICATE_ARN
     alb.ingress.kubernetes.io/backend-protocol: HTTP
     alb.ingress.kubernetes.io/healthcheck-path: /
     alb.ingress.kubernetes.io/success-codes: '200'
-    alb.ingress.kubernetes.io/healthcheck-interval-seconds: '30'
-    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
+    alb.ingress.kubernetes.io/load-balancer-name: livekit-$ENVIRONMENT-alb
   hosts:
-  - host: livekit-eks-tf.digi-telephony.com
-    paths:
-    - path: /
-      pathType: Prefix
+    - host: $LIVEKIT_DOMAIN
+      paths:
+        - path: /
+          pathType: Prefix
   tls:
-  - hosts:
-    - livekit-eks-tf.digi-telephony.com
+    - hosts:
+      - $LIVEKIT_DOMAIN
 EOF
 
 echo "✅ Values configuration created"
