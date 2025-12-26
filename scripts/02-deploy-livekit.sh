@@ -24,9 +24,90 @@ CERTIFICATE_ARN="arn:aws:acm:us-east-1:918595516608:certificate/4523a895-7899-41
 HELM_RELEASE_NAME="livekit-server"
 HELM_CHART_VERSION="1.5.2"
 
-# LiveKit API Keys
-API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
-API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
+# LiveKit API Keys - Generate using LiveKit CLI
+echo "🔑 Generating LiveKit API Keys..."
+
+# Check if lk CLI is available
+if ! command -v lk >/dev/null 2>&1; then
+    echo "📥 Installing LiveKit CLI..."
+    # Install LiveKit CLI
+    curl -sSL https://get.livekit.io | bash
+    
+    # Add to PATH for current session
+    export PATH="$HOME/.livekit/bin:$PATH"
+    
+    # Verify installation
+    if command -v lk >/dev/null 2>&1; then
+        echo "✅ LiveKit CLI installed successfully"
+        lk --version || true
+    else
+        echo "❌ Failed to install LiveKit CLI"
+        echo "💡 Falling back to provided keys"
+        API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
+        API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
+    fi
+else
+    echo "✅ LiveKit CLI already available"
+    lk --version || true
+fi
+
+# Generate new API keys using LiveKit CLI
+if command -v lk >/dev/null 2>&1; then
+    echo "🔧 Generating new API key pair..."
+    
+    # Try different commands to generate keys
+    if lk generate-keys >/dev/null 2>&1; then
+        KEY_OUTPUT=$(lk generate-keys 2>/dev/null)
+    elif lk create-keys >/dev/null 2>&1; then
+        KEY_OUTPUT=$(lk create-keys 2>/dev/null)
+    elif lk keys generate >/dev/null 2>&1; then
+        KEY_OUTPUT=$(lk keys generate 2>/dev/null)
+    else
+        echo "🔍 Available lk commands:"
+        lk --help | grep -E "(generate|create|keys)" || true
+        echo ""
+        echo "⚠️ Could not find key generation command, using provided keys"
+        API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
+        API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
+        KEY_OUTPUT=""
+    fi
+    
+    if [[ -n "$KEY_OUTPUT" ]]; then
+        echo "✅ Generated keys output:"
+        echo "$KEY_OUTPUT"
+        echo ""
+        
+        # Try to parse the output
+        if echo "$KEY_OUTPUT" | grep -q "API Key\|api.*key"; then
+            API_KEY=$(echo "$KEY_OUTPUT" | grep -i "api.*key" | head -1 | sed 's/.*: *//' | awk '{print $1}')
+            API_SECRET=$(echo "$KEY_OUTPUT" | grep -i "secret" | head -1 | sed 's/.*: *//' | awk '{print $1}')
+            
+            if [[ -n "$API_KEY" ]] && [[ -n "$API_SECRET" ]]; then
+                echo "✅ Successfully parsed generated keys"
+                echo "📋 API Key: $API_KEY"
+                echo "📋 API Secret: ${API_SECRET:0:20}..."
+            else
+                echo "⚠️ Could not parse keys from output, using provided keys"
+                API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
+                API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
+            fi
+        else
+            echo "⚠️ Unexpected key output format, using provided keys"
+            API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
+            API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
+        fi
+    else
+        echo "⚠️ No key output received, using provided keys"
+        API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
+        API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
+    fi
+else
+    echo "⚠️ LiveKit CLI not available, using provided keys"
+    API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
+    API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
+fi
+
+echo ""
 
 # Validate required environment variables
 if [[ -z "$CLUSTER_NAME" ]]; then
