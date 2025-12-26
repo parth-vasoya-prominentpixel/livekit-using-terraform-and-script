@@ -183,12 +183,14 @@ if [[ "$CERT_STATUS" == "ISSUED" ]]; then
     echo "   SANs: $CERT_SANS"
     
     # Verify our domains are covered
-    if echo "$CERT_SANS" | grep -q "$LIVEKIT_DOMAIN" && echo "$CERT_SANS" | grep -q "$TURN_DOMAIN"; then
-        echo "✅ Certificate covers both LiveKit and TURN domains"
+    if echo "$CERT_SANS" | grep -q "$LIVEKIT_DOMAIN"; then
+        echo "✅ Certificate covers LiveKit domain: $LIVEKIT_DOMAIN"
+        echo "ℹ️  TURN domain ($TURN_DOMAIN) doesn't need certificate coverage"
     else
-        echo "⚠️  Certificate may not cover all required domains"
-        echo "   Required: $LIVEKIT_DOMAIN, $TURN_DOMAIN"
+        echo "❌ Certificate doesn't cover required LiveKit domain"
+        echo "   Required: $LIVEKIT_DOMAIN"
         echo "   Available: $CERT_SANS"
+        exit 1
     fi
 else
     echo "❌ SSL certificate is not available or not issued"
@@ -300,9 +302,8 @@ service:
 # Ingress configuration for ALB
 ingress:
   enabled: true
-  className: "alb"
+  ingressClassName: "alb"
   annotations:
-    kubernetes.io/ingress.class: alb
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
@@ -323,6 +324,12 @@ ingress:
 EOF
 
 echo "✅ LiveKit values.yaml created"
+
+# Show the exact keys section for debugging
+echo "🔍 Keys section in values.yaml:"
+echo "keys:"
+echo "  $API_KEY: $API_SECRET"
+echo ""
 
 # Validate the generated YAML
 echo "🔍 Validating generated values.yaml..."
@@ -382,7 +389,7 @@ if helm list -n "$LIVEKIT_NAMESPACE" | grep -q "$HELM_RELEASE_NAME"; then
         
         # Wait a bit for cleanup
         echo "⏳ Waiting for cleanup to complete..."
-        sleep 15
+        sleep 5
         
         # Clean up any stuck resources
         echo "🧹 Cleaning up any remaining resources..."
@@ -390,7 +397,7 @@ if helm list -n "$LIVEKIT_NAMESPACE" | grep -q "$HELM_RELEASE_NAME"; then
         kubectl delete ingress -n "$LIVEKIT_NAMESPACE" --all 2>/dev/null || true
         
         # Wait for cleanup
-        sleep 10
+        sleep 5
         
         DEPLOYMENT_ACTION="install"
         echo "✅ Cleanup completed, ready for fresh installation"
@@ -415,7 +422,7 @@ if [[ "$DEPLOYMENT_ACTION" == "upgrade" ]]; then
         --namespace "$LIVEKIT_NAMESPACE" \
         --values /tmp/livekit-values.yaml \
         --version "$HELM_CHART_VERSION" \
-        --timeout 10m \
+        --timeout 5m \
         --wait; then
         echo "✅ LiveKit upgrade completed successfully"
     else
@@ -430,7 +437,7 @@ elif [[ "$DEPLOYMENT_ACTION" == "install" ]]; then
     if helm list -n "$LIVEKIT_NAMESPACE" | grep -q "$HELM_RELEASE_NAME"; then
         echo "🗑️ Found remaining release, removing it..."
         helm uninstall "$HELM_RELEASE_NAME" -n "$LIVEKIT_NAMESPACE" --wait || true
-        sleep 10
+        sleep 5
     fi
     
     # Install fresh deployment
@@ -438,7 +445,7 @@ elif [[ "$DEPLOYMENT_ACTION" == "install" ]]; then
         --namespace "$LIVEKIT_NAMESPACE" \
         --values /tmp/livekit-values.yaml \
         --version "$HELM_CHART_VERSION" \
-        --timeout 15m \
+        --timeout 5m \
         --wait; then
         echo "✅ LiveKit installation completed successfully"
     else
@@ -465,11 +472,11 @@ echo "📋 Step 8: Verify LiveKit Deployment"
 echo "===================================="
 
 echo "⏳ Waiting for LiveKit pods to be ready..."
-for i in {1..60}; do
+for i in {1..36}; do
     READY_PODS=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --no-headers 2>/dev/null | grep -c "1/1.*Running" || echo "0")
     TOTAL_PODS=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --no-headers 2>/dev/null | wc -l || echo "0")
     
-    echo "   Pod status: $READY_PODS/$TOTAL_PODS ready (attempt $i/60)"
+    echo "   Pod status: $READY_PODS/$TOTAL_PODS ready (attempt $i/36)"
     
     if [ "$READY_PODS" -gt 0 ] && [ "$READY_PODS" -eq "$TOTAL_PODS" ]; then
         echo "✅ All LiveKit pods are ready!"
@@ -500,7 +507,7 @@ echo "📋 Step 9: Get ALB Information"
 echo "=============================="
 
 echo "⏳ Waiting for ALB Ingress to be created..."
-for i in {1..30}; do
+for i in {1..18}; do
     if kubectl get ingress -n "$LIVEKIT_NAMESPACE" >/dev/null 2>&1; then
         INGRESS_COUNT=$(kubectl get ingress -n "$LIVEKIT_NAMESPACE" --no-headers | wc -l)
         if [ "$INGRESS_COUNT" -gt 0 ]; then
@@ -508,7 +515,7 @@ for i in {1..30}; do
             break
         fi
     fi
-    echo "   Waiting for ingress... (attempt $i/30)"
+    echo "   Waiting for ingress... (attempt $i/18)"
     sleep 5
 done
 
@@ -520,7 +527,7 @@ echo ""
 # Get ALB DNS name
 echo "⏳ Getting ALB DNS name..."
 ALB_DNS=""
-for i in {1..30}; do
+for i in {1..18}; do
     ALB_DNS=$(kubectl get ingress -n "$LIVEKIT_NAMESPACE" -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
     
     if [[ -n "$ALB_DNS" && "$ALB_DNS" != "null" ]]; then
@@ -528,8 +535,8 @@ for i in {1..30}; do
         break
     fi
     
-    echo "   Waiting for ALB DNS... (attempt $i/30)"
-    sleep 10
+    echo "   Waiting for ALB DNS... (attempt $i/18)"
+    sleep 5
 done
 
 if [[ -z "$ALB_DNS" || "$ALB_DNS" == "null" ]]; then
