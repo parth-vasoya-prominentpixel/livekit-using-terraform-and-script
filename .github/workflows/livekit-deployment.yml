@@ -35,13 +35,13 @@ on:
         required: false
         default: false
         type: boolean
-      skip_load_balancer:
-        description: 'Skip Load Balancer Controller Setup'
+      skip_eks_access:
+        description: 'Skip EKS Access Policy Configuration'
         required: false
         default: false
         type: boolean
-      skip_eks_access:
-        description: 'Skip EKS Access Policy Configuration'
+      skip_load_balancer:
+        description: 'Skip Load Balancer Controller Setup'
         required: false
         default: false
         type: boolean
