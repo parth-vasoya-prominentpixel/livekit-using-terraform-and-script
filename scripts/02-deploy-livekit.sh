@@ -146,37 +146,32 @@ livekit:
     use_external_ip: true
     port_range_start: 50000
     port_range_end: 60000
-
-redis:
-  address: $REDIS_ENDPOINT
-
-keys:
-  APIKmrHi78hxpbd: Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB
-
-metrics:
-  enabled: true
-  prometheus:
+  redis:
+    address: $REDIS_ENDPOINT
+  keys:
+    APIKmrHi78hxpbd: Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB
+  metrics:
     enabled: true
-    port: 6789
-
-resources:
-  requests:
-    cpu: 500m
-    memory: 512Mi
-  limits:
-    cpu: 2000m
-    memory: 2Gi
-
-affinity:
-  podAntiAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-    - labelSelector:
-        matchExpressions:
-        - key: app
-          operator: In
-          values:
-          - livekit-livekit-server
-      topologyKey: "kubernetes.io/hostname"
+    prometheus:
+      enabled: true
+      port: 6789
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: 2000m
+      memory: 2Gi
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - livekit-livekit-server
+          topologyKey: "kubernetes.io/hostname"
 
 turn:
   enabled: true
