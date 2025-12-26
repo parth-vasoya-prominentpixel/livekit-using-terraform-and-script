@@ -22,13 +22,13 @@ REDIS_ENDPOINT="${REDIS_ENDPOINT:-}"
 LIVEKIT_NAMESPACE="livekit"
 LIVEKIT_DOMAIN="livekit-eks-tf.digi-telephony.com"
 TURN_DOMAIN="turn-eks-tf.digi-telephony.com"
-CERTIFICATE_ARN="arn:aws:acm:us-east-1:918595516608:certificate/388e3ff7-9763-4772-bfef-56cf64fcc414"
+CERTIFICATE_ARN="arn:aws:acm:us-east-1:918595516608:certificate/4523a895-7899-41a3-8589-2a5baed3b420"
 HELM_RELEASE_NAME="livekit-server"
 HELM_CHART_VERSION="1.5.2"
 
 # LiveKit API Keys (Generate secure keys)
-API_KEY="APIKmrHi78hxpbd"
-API_SECRET="Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB"
+API_KEY="a630d5cf73030309d7de89d9c34f18b6"
+API_SECRET="8ae7889d73e878636e434640027f2b33e3ba03836e9af0ee9f2ce33297a7f872"
 
 # Validate required environment variables
 if [[ -z "$CLUSTER_NAME" ]]; then
