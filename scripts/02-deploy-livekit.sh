@@ -109,16 +109,64 @@ fi
 echo ""
 
 # =============================================================================
-# STEP 1: CHECK AND CREATE LIVEKIT NAMESPACE
+# STEP 1: CHECK AND CLEANUP EXISTING FAILED DEPLOYMENTS FIRST
 # =============================================================================
 
-echo "📋 Step 1: Check and Create LiveKit Namespace"
+echo "📋 Step 1: Check and Cleanup Existing Failed Deployments"
+echo "========================================================"
+
+if helm list -n "$LIVEKIT_NAMESPACE" | grep -q "$HELM_RELEASE_NAME"; then
+    RELEASE_STATUS=$(helm list -n "$LIVEKIT_NAMESPACE" -f "$HELM_RELEASE_NAME" -o json | jq -r '.[0].status' 2>/dev/null || echo "unknown")
+    RELEASE_VERSION=$(helm list -n "$LIVEKIT_NAMESPACE" -f "$HELM_RELEASE_NAME" -o json | jq -r '.[0].chart' 2>/dev/null || echo "unknown")
+    
+    echo "ℹ️  Found existing LiveKit deployment:"
+    echo "   Release: $HELM_RELEASE_NAME"
+    echo "   Status: $RELEASE_STATUS"
+    echo "   Chart: $RELEASE_VERSION"
+    echo ""
+    
+    if [[ "$RELEASE_STATUS" != "deployed" ]]; then
+        echo "⚠️  Existing deployment status is '$RELEASE_STATUS', cleaning up first..."
+        echo "🗑️ Removing failed/stuck deployment..."
+        
+        # Force remove the failed deployment
+        helm uninstall "$HELM_RELEASE_NAME" -n "$LIVEKIT_NAMESPACE" --wait || true
+        
+        # Wait a bit for cleanup
+        echo "⏳ Waiting for cleanup to complete..."
+        sleep 5
+        
+        # Clean up any stuck resources
+        echo "🧹 Cleaning up any remaining resources..."
+        kubectl delete pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --force --grace-period=0 2>/dev/null || true
+        kubectl delete ingress -n "$LIVEKIT_NAMESPACE" --all 2>/dev/null || true
+        
+        # Wait for cleanup
+        sleep 5
+        
+        echo "✅ Cleanup completed, ready for fresh installation"
+        DEPLOYMENT_ACTION="install"
+    else
+        echo "✅ Existing deployment is healthy, will upgrade later"
+        DEPLOYMENT_ACTION="upgrade"
+    fi
+else
+    echo "ℹ️  No existing LiveKit deployment found"
+    DEPLOYMENT_ACTION="install"
+fi
+echo ""
+
+# =============================================================================
+# STEP 2: CHECK AND CREATE LIVEKIT NAMESPACE
+# =============================================================================
+
+echo "📋 Step 2: Check and Create LiveKit Namespace"
 echo "=============================================="
 
 if kubectl get namespace "$LIVEKIT_NAMESPACE" >/dev/null 2>&1; then
     echo "✅ Namespace '$LIVEKIT_NAMESPACE' already exists"
 else
-    echo "🔄 Creating namespace '$LIVEKIT_NAMESPACE'..."
+    echo "�  Creating namespace '$LIVEKIT_NAMESPACE'..."
     kubectl create namespace "$LIVEKIT_NAMESPACE"
     echo "✅ Namespace '$LIVEKIT_NAMESPACE' created"
 fi
@@ -134,10 +182,10 @@ echo "✅ Namespace labels updated"
 echo ""
 
 # =============================================================================
-# STEP 2: VERIFY AWS LOAD BALANCER CONTROLLER
+# STEP 3: VERIFY AWS LOAD BALANCER CONTROLLER
 # =============================================================================
 
-echo "📋 Step 2: Verify AWS Load Balancer Controller"
+echo "📋 Step 3: Verify AWS Load Balancer Controller"
 echo "=============================================="
 
 if kubectl get deployment aws-load-balancer-controller -n kube-system >/dev/null 2>&1; then
@@ -163,10 +211,10 @@ fi
 echo ""
 
 # =============================================================================
-# STEP 3: VERIFY SSL CERTIFICATE
+# STEP 4: VERIFY SSL CERTIFICATE
 # =============================================================================
 
-echo "📋 Step 3: Verify SSL Certificate"
+echo "📋 Step 4: Verify SSL Certificate"
 echo "=================================="
 
 echo "🔍 Checking SSL certificate in ACM..."
@@ -201,10 +249,10 @@ fi
 echo ""
 
 # =============================================================================
-# STEP 4: ADD LIVEKIT HELM REPOSITORY
+# STEP 5: ADD LIVEKIT HELM REPOSITORY
 # =============================================================================
 
-echo "📋 Step 4: Add LiveKit Helm Repository"
+echo "📋 Step 5: Add LiveKit Helm Repository"
 echo "======================================"
 
 echo "🔄 Adding LiveKit Helm repository..."
@@ -221,10 +269,10 @@ echo "✅ Helm repositories updated"
 echo ""
 
 # =============================================================================
-# STEP 5: CREATE LIVEKIT VALUES CONFIGURATION
+# STEP 6: CREATE LIVEKIT VALUES CONFIGURATION
 # =============================================================================
 
-echo "📋 Step 5: Create LiveKit Values Configuration"
+echo "📋 Step 6: Create LiveKit Values Configuration"
 echo "=============================================="
 
 echo "🔄 Creating LiveKit values.yaml configuration..."
@@ -361,59 +409,11 @@ cat /tmp/livekit-values.yaml
 echo ""
 
 # =============================================================================
-# STEP 6: CHECK EXISTING LIVEKIT DEPLOYMENT
+# STEP 7: DEPLOY LIVEKIT
 # =============================================================================
 
-echo "📋 Step 6: Check Existing LiveKit Deployment"
-echo "============================================"
-
-if helm list -n "$LIVEKIT_NAMESPACE" | grep -q "$HELM_RELEASE_NAME"; then
-    RELEASE_STATUS=$(helm list -n "$LIVEKIT_NAMESPACE" -f "$HELM_RELEASE_NAME" -o json | jq -r '.[0].status' 2>/dev/null || echo "unknown")
-    RELEASE_VERSION=$(helm list -n "$LIVEKIT_NAMESPACE" -f "$HELM_RELEASE_NAME" -o json | jq -r '.[0].chart' 2>/dev/null || echo "unknown")
-    
-    echo "ℹ️  Found existing LiveKit deployment:"
-    echo "   Release: $HELM_RELEASE_NAME"
-    echo "   Status: $RELEASE_STATUS"
-    echo "   Chart: $RELEASE_VERSION"
-    echo ""
-    
-    if [[ "$RELEASE_STATUS" == "deployed" ]]; then
-        echo "✅ Existing deployment is healthy, will upgrade"
-        DEPLOYMENT_ACTION="upgrade"
-    else
-        echo "⚠️  Existing deployment status is '$RELEASE_STATUS', will clean up and reinstall"
-        echo "🗑️ Removing failed/stuck deployment..."
-        
-        # Force remove the failed deployment
-        helm uninstall "$HELM_RELEASE_NAME" -n "$LIVEKIT_NAMESPACE" --wait || true
-        
-        # Wait a bit for cleanup
-        echo "⏳ Waiting for cleanup to complete..."
-        sleep 5
-        
-        # Clean up any stuck resources
-        echo "🧹 Cleaning up any remaining resources..."
-        kubectl delete pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --force --grace-period=0 2>/dev/null || true
-        kubectl delete ingress -n "$LIVEKIT_NAMESPACE" --all 2>/dev/null || true
-        
-        # Wait for cleanup
-        sleep 5
-        
-        DEPLOYMENT_ACTION="install"
-        echo "✅ Cleanup completed, ready for fresh installation"
-    fi
-else
-    echo "ℹ️  No existing LiveKit deployment found"
-    DEPLOYMENT_ACTION="install"
-fi
-echo ""
-
-# =============================================================================
-# STEP 7: DEPLOY OR UPGRADE LIVEKIT
-# =============================================================================
-
-echo "📋 Step 7: Deploy or Upgrade LiveKit"
-echo "===================================="
+echo "📋 Step 7: Deploy LiveKit"
+echo "========================="
 
 if [[ "$DEPLOYMENT_ACTION" == "upgrade" ]]; then
     echo "🔄 Upgrading existing LiveKit deployment..."
@@ -433,7 +433,7 @@ if [[ "$DEPLOYMENT_ACTION" == "upgrade" ]]; then
 elif [[ "$DEPLOYMENT_ACTION" == "install" ]]; then
     echo "🔄 Installing fresh LiveKit deployment..."
     
-    # Double-check no existing release exists
+    # Double-check no existing release exists (should be clean from Step 1)
     if helm list -n "$LIVEKIT_NAMESPACE" | grep -q "$HELM_RELEASE_NAME"; then
         echo "🗑️ Found remaining release, removing it..."
         helm uninstall "$HELM_RELEASE_NAME" -n "$LIVEKIT_NAMESPACE" --wait || true
