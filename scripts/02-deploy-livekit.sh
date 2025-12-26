@@ -107,7 +107,7 @@ if helm list -n "$LIVEKIT_NAMESPACE" | grep -q "$HELM_RELEASE_NAME"; then
         helm uninstall "$HELM_RELEASE_NAME" -n "$LIVEKIT_NAMESPACE" --wait || true
         kubectl delete pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --force --grace-period=0 2>/dev/null || true
         kubectl delete ingress -n "$LIVEKIT_NAMESPACE" --all 2>/dev/null || true
-        sleep 5
+        sleep 3
         echo "✅ Cleanup completed"
     else
         echo "✅ Existing deployment is healthy"
@@ -291,7 +291,7 @@ for i in {1..24}; do
         break
     fi
     
-    sleep 5
+    sleep 3
 done
 
 echo ""
@@ -320,7 +320,7 @@ for i in {1..12}; do
     fi
     
     echo "   Waiting for ALB DNS... (attempt $i/12)"
-    sleep 10
+    sleep 7
 done
 
 if [[ -z "$ALB_DNS" || "$ALB_DNS" == "null" ]]; then
