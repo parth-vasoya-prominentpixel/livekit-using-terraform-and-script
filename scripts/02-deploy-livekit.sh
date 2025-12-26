@@ -168,6 +168,7 @@ livekit:
 redis:
   address: $REDIS_ENDPOINT
 
+# API Keys - MUST be at root level, not under livekit section
 keys:
   $API_KEY: $API_SECRET
 
