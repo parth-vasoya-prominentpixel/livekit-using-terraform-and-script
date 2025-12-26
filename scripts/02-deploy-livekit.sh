@@ -18,62 +18,21 @@ AWS_REGION="${AWS_REGION:-us-east-1}"
 ENVIRONMENT="${ENVIRONMENT:-dev}"
 REDIS_ENDPOINT="${REDIS_ENDPOINT:-}"
 
-# LiveKit Configuration
+# LiveKit Configuration - configurable via environment variables
 LIVEKIT_NAMESPACE="livekit"
-LIVEKIT_DOMAIN="livekit-eks-tf.digi-telephony.com"
-TURN_DOMAIN="turn-eks-tf.digi-telephony.com"
-CERTIFICATE_ARN="arn:aws:acm:us-east-1:918595516608:certificate/388e3ff7-9763-4772-bfef-56cf64fcc414"
+LIVEKIT_DOMAIN="${LIVEKIT_DOMAIN:-livekit-eks-tf.digi-telephony.com}"
+TURN_DOMAIN="${TURN_DOMAIN:-turn-eks-tf.digi-telephony.com}"
+CERTIFICATE_ARN="arn:aws:acm:us-east-1:918595516608:certificate/4523a895-7899-41a3-8589-2a5baed3b420"
 HELM_RELEASE_NAME="livekit-server"
 HELM_CHART_VERSION="1.5.2"
 
-# LiveKit API Keys - Generate secure keys dynamically
-echo "🔐 Generating secure LiveKit API keys..."
+# LiveKit API Keys - Use environment variables with defaults
+API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
+API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
 
-# Generate API Key (starts with LK, 16 characters total)
-API_KEY="LK$(openssl rand -hex 7 | tr '[:lower:]' '[:upper:]')"
-
-# Generate API Secret (64 characters, base64 encoded for security)
-API_SECRET=$(openssl rand -base64 48 | tr -d '\n' | head -c 64)
-
-echo "✅ Generated API Key: $API_KEY"
-echo "✅ Generated API Secret: ${API_SECRET:0:10}... (64 chars total)"
+echo "✅ Using API Key: $API_KEY"
+echo "✅ Using API Secret: ${API_SECRET:0:10}... (${#API_SECRET} chars)"
 echo ""
-
-# Save keys to a secure file for reference (optional)
-if [[ -n "${GITHUB_WORKSPACE:-}" ]]; then
-    # In GitHub Actions, save to workspace for potential reuse
-    echo "📋 Saving keys to workspace for reference..."
-    mkdir -p "$GITHUB_WORKSPACE/.livekit"
-    cat > "$GITHUB_WORKSPACE/.livekit/api-keys.txt" << EOF
-# LiveKit API Keys - Generated on $(date)
-# Environment: $ENVIRONMENT
-# Cluster: $CLUSTER_NAME
-
-API_KEY=$API_KEY
-API_SECRET=$API_SECRET
-
-# Usage:
-# WebSocket URL: wss://$LIVEKIT_DOMAIN
-# HTTP URL: https://$LIVEKIT_DOMAIN
-EOF
-    echo "✅ Keys saved to .livekit/api-keys.txt"
-else
-    # Local execution, save to /tmp
-    echo "📋 Saving keys to /tmp for reference..."
-    cat > /tmp/livekit-api-keys.txt << EOF
-# LiveKit API Keys - Generated on $(date)
-# Environment: $ENVIRONMENT
-# Cluster: $CLUSTER_NAME
-
-API_KEY=$API_KEY
-API_SECRET=$API_SECRET
-
-# Usage:
-# WebSocket URL: wss://$LIVEKIT_DOMAIN
-# HTTP URL: https://$LIVEKIT_DOMAIN
-EOF
-    echo "✅ Keys saved to /tmp/livekit-api-keys.txt"
-fi
 
 # Validate required environment variables
 if [[ -z "$CLUSTER_NAME" ]]; then
@@ -268,25 +227,14 @@ echo "=============================================="
 
 echo "🔄 Creating LiveKit values.yaml configuration..."
 
-# Validate API keys are set and properly formatted
+# Validate API keys are set
 if [[ -z "$API_KEY" || -z "$API_SECRET" ]]; then
-    echo "❌ API_KEY or API_SECRET generation failed"
+    echo "❌ API_KEY or API_SECRET is empty"
     exit 1
 fi
 
-# Validate key formats
-if [[ ! "$API_KEY" =~ ^LK[A-F0-9]{14}$ ]]; then
-    echo "❌ API_KEY format is invalid: $API_KEY"
-    exit 1
-fi
-
-if [[ ${#API_SECRET} -ne 64 ]]; then
-    echo "❌ API_SECRET length is invalid: ${#API_SECRET} (expected 64)"
-    exit 1
-fi
-
-echo "✅ API Key: $API_KEY (format validated)"
-echo "✅ API Secret: ${API_SECRET:0:10}... (length: ${#API_SECRET} chars - validated)"
+echo "✅ API Key: $API_KEY"
+echo "✅ API Secret: ${API_SECRET:0:10}... (length: ${#API_SECRET} chars)"
 echo ""
 
 # Create values.yaml for LiveKit deployment - exact structure as provided
@@ -302,7 +250,7 @@ redis:
   address: $REDIS_ENDPOINT
 
 keys:
-  "$API_KEY": "$API_SECRET"
+  $API_KEY: $API_SECRET
 
 metrics:
   enabled: true
@@ -423,18 +371,29 @@ if helm list -n "$LIVEKIT_NAMESPACE" | grep -q "$HELM_RELEASE_NAME"; then
     echo ""
     
     if [[ "$RELEASE_STATUS" == "deployed" ]]; then
-        echo "🤔 LiveKit is already deployed. Choose action:"
-        echo "   1. Upgrade existing deployment"
-        echo "   2. Skip deployment (use existing)"
-        echo "   3. Uninstall and reinstall"
-        echo ""
-        
-        # For automation, we'll upgrade
-        echo "🔄 Proceeding with upgrade for automation..."
+        echo "✅ Existing deployment is healthy, will upgrade"
         DEPLOYMENT_ACTION="upgrade"
     else
-        echo "⚠️  Existing deployment is not healthy, will reinstall"
+        echo "⚠️  Existing deployment status is '$RELEASE_STATUS', will clean up and reinstall"
+        echo "🗑️ Removing failed/stuck deployment..."
+        
+        # Force remove the failed deployment
+        helm uninstall "$HELM_RELEASE_NAME" -n "$LIVEKIT_NAMESPACE" --wait || true
+        
+        # Wait a bit for cleanup
+        echo "⏳ Waiting for cleanup to complete..."
+        sleep 15
+        
+        # Clean up any stuck resources
+        echo "🧹 Cleaning up any remaining resources..."
+        kubectl delete pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --force --grace-period=0 2>/dev/null || true
+        kubectl delete ingress -n "$LIVEKIT_NAMESPACE" --all 2>/dev/null || true
+        
+        # Wait for cleanup
+        sleep 10
+        
         DEPLOYMENT_ACTION="install"
+        echo "✅ Cleanup completed, ready for fresh installation"
     fi
 else
     echo "ℹ️  No existing LiveKit deployment found"
@@ -465,24 +424,32 @@ if [[ "$DEPLOYMENT_ACTION" == "upgrade" ]]; then
     fi
     
 elif [[ "$DEPLOYMENT_ACTION" == "install" ]]; then
-    echo "🔄 Installing LiveKit deployment..."
+    echo "🔄 Installing fresh LiveKit deployment..."
     
-    # Remove any failed releases first
+    # Double-check no existing release exists
     if helm list -n "$LIVEKIT_NAMESPACE" | grep -q "$HELM_RELEASE_NAME"; then
-        echo "🗑️ Removing failed release..."
-        helm uninstall "$HELM_RELEASE_NAME" -n "$LIVEKIT_NAMESPACE" || true
+        echo "🗑️ Found remaining release, removing it..."
+        helm uninstall "$HELM_RELEASE_NAME" -n "$LIVEKIT_NAMESPACE" --wait || true
         sleep 10
     fi
     
+    # Install fresh deployment
     if helm install "$HELM_RELEASE_NAME" livekit/livekit-server \
         --namespace "$LIVEKIT_NAMESPACE" \
         --values /tmp/livekit-values.yaml \
         --version "$HELM_CHART_VERSION" \
-        --timeout 10m \
+        --timeout 15m \
         --wait; then
         echo "✅ LiveKit installation completed successfully"
     else
         echo "❌ LiveKit installation failed"
+        
+        # Show debugging information
+        echo "🔍 Debugging failed installation:"
+        helm list -n "$LIVEKIT_NAMESPACE" || true
+        kubectl get pods -n "$LIVEKIT_NAMESPACE" || true
+        kubectl get events -n "$LIVEKIT_NAMESPACE" --sort-by='.lastTimestamp' | tail -10 || true
+        
         exit 1
     fi
 else
@@ -719,29 +686,39 @@ if [ "$FINAL_READY" -gt 0 ] && [ "$FINAL_READY" -eq "$FINAL_TOTAL" ]; then
         POD_STATUS=$(kubectl get pod "$POD_NAME" -n "$LIVEKIT_NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null)
         echo "📋 Pod Status: $POD_STATUS"
         
-        # Check for errors in logs (last 20 lines)
+        # Check for errors in logs (last 30 lines)
         echo "🔍 Checking recent logs for errors..."
-        if kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=20 2>/dev/null | grep -i "error\|fail\|fatal" | head -3; then
-            echo "⚠️  Found potential errors in logs (check above)"
+        ERROR_LOGS=$(kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=30 2>/dev/null | grep -i "error\|fail\|fatal" | head -5)
+        if [[ -n "$ERROR_LOGS" ]]; then
+            echo "⚠️  Found potential errors in logs:"
+            echo "$ERROR_LOGS"
         else
             echo "✅ No obvious errors found in recent logs"
         fi
         
         # Check for successful startup messages
         echo "🔍 Checking for startup success indicators..."
-        if kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=50 2>/dev/null | grep -i "server.*start\|listening\|ready" | head -3; then
-            echo "✅ Found startup success indicators"
+        SUCCESS_LOGS=$(kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=50 2>/dev/null | grep -i "server.*start\|listening\|ready\|started" | head -3)
+        if [[ -n "$SUCCESS_LOGS" ]]; then
+            echo "✅ Found startup success indicators:"
+            echo "$SUCCESS_LOGS"
         else
             echo "ℹ️  No startup indicators found (may still be starting)"
         fi
         
         # Show key configuration status
         echo "🔍 Checking key configuration status..."
-        if kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=100 2>/dev/null | grep -i "key" | grep -v "keyboard" | head -2; then
-            echo "✅ Key configuration logs found"
+        KEY_LOGS=$(kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=100 2>/dev/null | grep -i "key\|auth" | grep -v "keyboard" | head -3)
+        if [[ -n "$KEY_LOGS" ]]; then
+            echo "✅ Key configuration logs:"
+            echo "$KEY_LOGS"
         else
             echo "ℹ️  No key configuration logs found (may be normal)"
         fi
+        
+        # Show last 10 lines of logs for general status
+        echo "🔍 Recent log entries (last 10 lines):"
+        kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=10 2>/dev/null || echo "Could not retrieve logs"
         
     else
         echo "⚠️  Could not find LiveKit pod for log checking"
