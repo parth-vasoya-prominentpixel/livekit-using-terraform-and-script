@@ -158,6 +158,14 @@ echo "📋 Step 4: Create Values Configuration"
 echo "======================================"
 
 cat > /tmp/livekit-values.yaml << EOF
+# LiveKit Helm Chart Values - Corrected Configuration
+# Keys must be at root level for LiveKit server to read them
+
+# API Keys Configuration - CRITICAL: Must be at root level
+keys:
+  "$API_KEY": "$API_SECRET"
+
+# LiveKit Server Configuration
 livekit:
   domain: $LIVEKIT_DOMAIN
   rtc:
@@ -165,19 +173,18 @@ livekit:
     port_range_start: 50000
     port_range_end: 60000
 
+# Redis Configuration
 redis:
   address: $REDIS_ENDPOINT
 
-# API Keys - MUST be at root level, not under livekit section
-keys:
-  $API_KEY: $API_SECRET
-
+# Metrics Configuration
 metrics:
   enabled: true
   prometheus:
     enabled: true
     port: 6789
 
+# Resource Configuration
 resources:
   requests:
     cpu: 500m
@@ -186,6 +193,7 @@ resources:
     cpu: 2000m
     memory: 2Gi
 
+# Pod Anti-Affinity for better distribution
 affinity:
   podAntiAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
@@ -197,24 +205,18 @@ affinity:
           - livekit-livekit-server
       topologyKey: "kubernetes.io/hostname"
 
+# TURN Server Configuration
 turn:
   enabled: true
   domain: $TURN_DOMAIN
   tls_port: 3478
   udp_port: 3478
 
-loadBalancer:
-  type: alb
-  tls:
-  - hosts:
-    - $LIVEKIT_DOMAIN
-    certificateArn: $CERTIFICATE_ARN
-
-hostNetwork: true
-
+# Service Configuration
 service:
   type: NodePort
 
+# Ingress Configuration
 ingress:
   enabled: true
   ingressClassName: "alb"
@@ -239,6 +241,39 @@ ingress:
 EOF
 
 echo "✅ Values configuration created"
+
+# Debug: Show the generated values file for verification
+echo ""
+echo "🔍 Generated values.yaml content (for debugging):"
+echo "================================================="
+cat /tmp/livekit-values.yaml
+echo "================================================="
+echo ""
+
+# Validate YAML syntax
+echo "🔍 Validating YAML syntax..."
+if command -v python3 >/dev/null 2>&1; then
+    python3 -c "import yaml; yaml.safe_load(open('/tmp/livekit-values.yaml'))" 2>/dev/null && echo "✅ YAML syntax is valid" || echo "❌ YAML syntax error detected"
+elif command -v yq >/dev/null 2>&1; then
+    yq eval '.' /tmp/livekit-values.yaml >/dev/null 2>&1 && echo "✅ YAML syntax is valid" || echo "❌ YAML syntax error detected"
+else
+    echo "⚠️ Cannot validate YAML syntax (python3 or yq not available)"
+fi
+
+# Validate that keys are present
+echo ""
+echo "🔍 Validating keys configuration..."
+if grep -q "keys:" /tmp/livekit-values.yaml; then
+    echo "✅ Keys section found in configuration"
+    KEY_COUNT=$(grep -A 10 "keys:" /tmp/livekit-values.yaml | grep -c ":")
+    echo "✅ Found $((KEY_COUNT-1)) key(s) configured"
+    
+    # Show the keys section (without revealing the secret)
+    echo "📋 Keys section preview:"
+    grep -A 3 "keys:" /tmp/livekit-values.yaml | sed 's/: .*/: [REDACTED]/'
+else
+    echo "❌ Keys section not found in configuration!"
+fi
 echo ""
 
 # =============================================================================
@@ -259,15 +294,50 @@ if helm install "$HELM_RELEASE_NAME" livekit/livekit-server \
 else
     echo "❌ LiveKit installation failed"
     
-    # Show debugging info
-    echo "🔍 Pod Status:"
-    kubectl get pods -n "$LIVEKIT_NAMESPACE" || true
+    # Enhanced debugging info
+    echo ""
+    echo "🔍 DETAILED TROUBLESHOOTING:"
+    echo "============================"
     
-    echo "🔍 Pod Logs:"
-    POD_NAME=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    # Show the values file that was used
+    echo "📋 Values file used for deployment:"
+    echo "-----------------------------------"
+    cat /tmp/livekit-values.yaml | head -20
+    echo "... (truncated for brevity)"
+    echo ""
+    
+    # Show pod status
+    echo "📋 Pod Status:"
+    kubectl get pods -n "$LIVEKIT_NAMESPACE" -o wide || true
+    echo ""
+    
+    # Show pod description for more details
+    echo "📋 Pod Description:"
+    POD_NAME=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
     if [[ -n "$POD_NAME" ]]; then
-        kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=20 2>/dev/null || echo "No logs available"
+        echo "Pod: $POD_NAME"
+        kubectl describe pod "$POD_NAME" -n "$LIVEKIT_NAMESPACE" | tail -20
     fi
+    echo ""
+    
+    # Show pod logs with more context
+    echo "📋 Pod Logs (last 50 lines):"
+    if [[ -n "$POD_NAME" ]]; then
+        kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=50 2>/dev/null || echo "No logs available"
+    else
+        echo "No pod found to get logs from"
+    fi
+    echo ""
+    
+    # Show events
+    echo "📋 Recent Events:"
+    kubectl get events -n "$LIVEKIT_NAMESPACE" --sort-by='.lastTimestamp' | tail -10 || true
+    echo ""
+    
+    # Show configmap if it exists
+    echo "📋 ConfigMap (if exists):"
+    kubectl get configmap -n "$LIVEKIT_NAMESPACE" -o yaml 2>/dev/null | head -30 || echo "No configmap found"
+    echo ""
     
     exit 1
 fi
