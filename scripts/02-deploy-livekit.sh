@@ -162,7 +162,7 @@ redis:
 
 # API Keys for authentication
 keys:
-  "$API_KEY": "$API_SECRET"
+    APIKmrHi78hxpbd: Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB
 
 # Resource limits
 resources:
