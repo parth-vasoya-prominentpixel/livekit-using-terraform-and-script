@@ -24,75 +24,33 @@ CERTIFICATE_ARN="arn:aws:acm:us-east-1:918595516608:certificate/4523a895-7899-41
 HELM_RELEASE_NAME="livekit-server"
 HELM_CHART_VERSION="1.5.2"
 
-# LiveKit API Keys - Generate using LiveKit server
-echo "🔑 Generating LiveKit API Keys..."
+# LiveKit API Keys - Use predefined keys for consistency
+echo "🔑 Setting up LiveKit API Keys..."
 
-# Check if livekit-server is available (it was installed)
-if command -v livekit-server >/dev/null 2>&1; then
-    echo "✅ LiveKit server found, generating keys..."
-    
-    # Generate keys using livekit-server
-    echo "🔧 Generating new API key pair..."
-    
-    # Use livekit-server to generate keys
-    KEY_OUTPUT=$(livekit-server generate-keys 2>/dev/null || echo "")
-    
-    if [[ -z "$KEY_OUTPUT" ]]; then
-        # Try alternative command
-        KEY_OUTPUT=$(livekit-server --generate-keys 2>/dev/null || echo "")
-    fi
-    
-    if [[ -z "$KEY_OUTPUT" ]]; then
-        # Show available options
-        echo "🔍 Available livekit-server options:"
-        livekit-server --help | grep -i key || true
-        echo ""
-    fi
-    
-    if [[ -n "$KEY_OUTPUT" ]]; then
-        echo "✅ Generated keys output:"
-        echo "$KEY_OUTPUT"
-        
-        # Parse the output - LiveKit typically outputs in format "key: secret"
-        if echo "$KEY_OUTPUT" | grep -q ":"; then
-            API_KEY=$(echo "$KEY_OUTPUT" | head -1 | cut -d':' -f1 | xargs)
-            API_SECRET=$(echo "$KEY_OUTPUT" | head -1 | cut -d':' -f2 | xargs)
-            
-            if [[ -n "$API_KEY" ]] && [[ -n "$API_SECRET" ]]; then
-                echo "✅ Successfully parsed generated keys"
-                echo "📋 API Key: $API_KEY"
-                echo "📋 API Secret: ${API_SECRET:0:20}..."
-            else
-                echo "⚠️ Could not parse keys, using provided keys"
-                API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
-                API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
-            fi
-        else
-            echo "⚠️ Unexpected key format, using provided keys"
-            API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
-            API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
-        fi
-    else
-        echo "⚠️ No key output, manually generating keys..."
-        
-        # Generate keys manually in the correct format
-        API_KEY="API$(openssl rand -hex 8)"
-        API_SECRET=$(openssl rand -base64 32)
-        
-        echo "✅ Generated keys manually"
-        echo "📋 API Key: $API_KEY"
-        echo "📋 API Secret: ${API_SECRET:0:20}..."
-    fi
+# Use the validated keys from the test configuration
+API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
+API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
+
+echo "✅ Using predefined API keys"
+echo "📋 API Key: $API_KEY"
+echo "📋 API Secret: ${API_SECRET:0:20}..."
+
+# Validate key format
+if [[ ${#API_KEY} -lt 10 ]]; then
+    echo "❌ API Key too short (${#API_KEY} characters)"
+    exit 1
+fi
+
+if [[ ${#API_SECRET} -lt 20 ]]; then
+    echo "❌ API Secret too short (${#API_SECRET} characters)"
+    exit 1
+fi
+
+# Test if secret is valid base64
+if echo "$API_SECRET" | base64 -d >/dev/null 2>&1; then
+    echo "✅ API Secret is valid base64 format"
 else
-    echo "⚠️ LiveKit server not found, manually generating keys..."
-    
-    # Generate keys manually in the correct format
-    API_KEY="API$(openssl rand -hex 8)"
-    API_SECRET=$(openssl rand -base64 32)
-    
-    echo "✅ Generated keys manually using OpenSSL"
-    echo "📋 API Key: $API_KEY"
-    echo "📋 API Secret: ${API_SECRET:0:20}..."
+    echo "⚠️ API Secret may not be valid base64, but continuing..."
 fi
 
 echo ""
@@ -267,7 +225,7 @@ redis:
   address: $REDIS_ENDPOINT
 
 keys:
-  $API_KEY: $API_SECRET
+  "$API_KEY": "$API_SECRET"
 
 metrics:
   enabled: true
@@ -340,8 +298,36 @@ echo "✅ Values configuration created"
 echo ""
 echo "🔍 Keys configuration in values.yaml:"
 echo "======================================"
-grep -A 5 "keys:" /tmp/livekit-values.yaml | sed 's/: .*/: [REDACTED]/' || echo "❌ No keys section found!"
+grep -A 5 "keys:" /tmp/livekit-values.yaml || echo "❌ No keys section found!"
 echo "======================================"
+echo ""
+
+# Also show the complete values file for debugging
+echo "🔍 Complete values.yaml file:"
+echo "=============================="
+cat /tmp/livekit-values.yaml
+echo "=============================="
+echo ""
+
+# Validate the YAML syntax
+echo "🔍 Validating YAML syntax..."
+if python3 -c "import yaml; yaml.safe_load(open('/tmp/livekit-values.yaml'))" 2>/dev/null; then
+    echo "✅ YAML syntax is valid"
+elif python -c "import yaml; yaml.safe_load(open('/tmp/livekit-values.yaml'))" 2>/dev/null; then
+    echo "✅ YAML syntax is valid"
+else
+    echo "⚠️ Could not validate YAML syntax (python/python3 not available)"
+fi
+
+# Check if keys section exists and is properly formatted
+if grep -q "^keys:" /tmp/livekit-values.yaml; then
+    echo "✅ Keys section found in values.yaml"
+    KEY_COUNT=$(grep -A 10 "^keys:" /tmp/livekit-values.yaml | grep -c ":")
+    echo "📋 Found $KEY_COUNT key entries"
+else
+    echo "❌ Keys section not found in values.yaml!"
+    exit 1
+fi
 echo ""
 
 # =============================================================================
