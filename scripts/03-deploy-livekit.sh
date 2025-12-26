@@ -91,7 +91,7 @@ echo "🧹 Cleaning up any existing deployment..."
 if helm list -n "$LIVEKIT_NAMESPACE" 2>/dev/null | grep -q "$HELM_RELEASE_NAME"; then
     echo "🗑️ Removing existing Helm release..."
     helm uninstall "$HELM_RELEASE_NAME" -n "$LIVEKIT_NAMESPACE" --timeout 60s || true
-    sleep 3
+    sleep 15
 fi
 
 # Force cleanup resources
@@ -146,19 +146,19 @@ livekit:
     use_external_ip: true
     port_range_start: 50000
     port_range_end: 60000
-
+ 
   redis:
     address: $REDIS_ENDPOINT
-
+ 
   keys:
     $API_KEY: $API_SECRET
-
+ 
   metrics:
     enabled: true
     prometheus:
       enabled: true
       port: 6789
-
+ 
   resources:
     requests:
       cpu: 500m
@@ -166,7 +166,7 @@ livekit:
     limits:
       cpu: 2000m
       memory: 2Gi
-
+ 
   affinity:
     podAntiAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
@@ -177,16 +177,16 @@ livekit:
                 values:
                   - livekit-livekit-server
           topologyKey: "kubernetes.io/hostname"
-
+ 
 turn:
   enabled: true
   domain: $TURN_DOMAIN
   tls_port: 3478
   udp_port: 3478
-
+ 
 # Enable host networking for direct node IP access (REQUIRED for LiveKit WebRTC)
 hostNetwork: true
-
+ 
 # Load balancer configuration - creates ALB
 loadBalancer:
   type: alb
@@ -194,11 +194,11 @@ loadBalancer:
     - hosts:
         - $LIVEKIT_DOMAIN
       certificateArn: $CERTIFICATE_ARN
-
+ 
 # Service configuration - NodePort for host networking
 service:
   type: NodePort
-
+ 
 # Ingress configuration - this creates the ALB load balancer
 ingress:
   enabled: true
@@ -247,7 +247,7 @@ if helm install "$HELM_RELEASE_NAME" livekit/livekit-server \
     --namespace "$LIVEKIT_NAMESPACE" \
     --values /tmp/livekit-values.yaml \
     --version "$HELM_CHART_VERSION" \
-    --timeout 3m \
+    --timeout 10m \
     --wait; then
     echo "✅ LiveKit deployment successful!"
 else
@@ -311,7 +311,7 @@ for i in {1..20}; do
     fi
     
     echo "   Waiting for ALB DNS... (attempt $i/20)"
-    sleep 7
+    sleep 10
 done
 
 if [[ -z "$ALB_DNS" || "$ALB_DNS" == "null" ]]; then
