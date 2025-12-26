@@ -708,42 +708,61 @@ FINAL_TOTAL=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name
 if [ "$FINAL_READY" -gt 0 ] && [ "$FINAL_READY" -eq "$FINAL_TOTAL" ]; then
     echo "✅ LiveKit pods are running ($FINAL_READY/$FINAL_TOTAL)"
     
-    # Check LiveKit logs for key configuration
-    echo "🔍 Checking LiveKit configuration..."
-    POD_NAME=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server -o jsonpath='{.items[0].metadata.name}')
+    # Get pod information for log checking
+    echo "🔍 Checking LiveKit pod status and logs..."
+    POD_NAME=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
     
     if [[ -n "$POD_NAME" ]]; then
         echo "📋 LiveKit Pod: $POD_NAME"
         
-        # Check for key configuration errors in logs
-        echo "🔍 Checking for key configuration in logs..."
-        if kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=50 | grep -i "key" | head -5; then
-            echo "✅ Key configuration logs found"
+        # Check pod status
+        POD_STATUS=$(kubectl get pod "$POD_NAME" -n "$LIVEKIT_NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null)
+        echo "📋 Pod Status: $POD_STATUS"
+        
+        # Check for errors in logs (last 20 lines)
+        echo "🔍 Checking recent logs for errors..."
+        if kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=20 2>/dev/null | grep -i "error\|fail\|fatal" | head -3; then
+            echo "⚠️  Found potential errors in logs (check above)"
         else
-            echo "ℹ️  No key-related logs found (may be normal)"
+            echo "✅ No obvious errors found in recent logs"
         fi
         
-        # Test internal connectivity
-        echo "🔄 Testing internal LiveKit connectivity..."
-        if kubectl exec -n "$LIVEKIT_NAMESPACE" "$POD_NAME" -- curl -s -f http://localhost:7880/ >/dev/null 2>&1; then
-            echo "✅ LiveKit server is responding internally"
+        # Check for successful startup messages
+        echo "🔍 Checking for startup success indicators..."
+        if kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=50 2>/dev/null | grep -i "server.*start\|listening\|ready" | head -3; then
+            echo "✅ Found startup success indicators"
         else
-            echo "⚠️  LiveKit server internal check failed (may be normal during startup)"
-            echo "   This is expected for new deployments and will resolve once fully started"
+            echo "ℹ️  No startup indicators found (may still be starting)"
         fi
+        
+        # Show key configuration status
+        echo "🔍 Checking key configuration status..."
+        if kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=100 2>/dev/null | grep -i "key" | grep -v "keyboard" | head -2; then
+            echo "✅ Key configuration logs found"
+        else
+            echo "ℹ️  No key configuration logs found (may be normal)"
+        fi
+        
     else
-        echo "⚠️  Could not find LiveKit pod for detailed checks"
+        echo "⚠️  Could not find LiveKit pod for log checking"
     fi
 else
     echo "❌ LiveKit pods are not ready ($FINAL_READY/$FINAL_TOTAL)"
     
     # Show pod status for debugging
     echo "🔍 Pod Status for Debugging:"
-    kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server -o wide
+    kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server -o wide 2>/dev/null || echo "No pods found"
     
     # Show recent events
     echo "🔍 Recent Events:"
-    kubectl get events -n "$LIVEKIT_NAMESPACE" --sort-by='.lastTimestamp' | tail -10
+    kubectl get events -n "$LIVEKIT_NAMESPACE" --sort-by='.lastTimestamp' 2>/dev/null | tail -5 || echo "No events found"
+    
+    # Show pod logs if any pods exist
+    POD_NAME=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    if [[ -n "$POD_NAME" ]]; then
+        echo "🔍 Pod Logs (last 10 lines):"
+        kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=10 2>/dev/null || echo "Could not retrieve logs"
+    fi
 fi
 
 echo ""
