@@ -104,10 +104,31 @@ if helm list -n "$LIVEKIT_NAMESPACE" | grep -q "$HELM_RELEASE_NAME"; then
     
     if [[ "$RELEASE_STATUS" != "deployed" ]]; then
         echo "🗑️ Removing failed deployment..."
-        helm uninstall "$HELM_RELEASE_NAME" -n "$LIVEKIT_NAMESPACE" --wait || true
+        
+        # Force cleanup without waiting for graceful shutdown
+        echo "   🔄 Step 1/4: Removing Helm release (no wait)..."
+        helm uninstall "$HELM_RELEASE_NAME" -n "$LIVEKIT_NAMESPACE" --timeout 30s 2>/dev/null || true
+        
+        echo "   🔄 Step 2/4: Force deleting pods..."
         kubectl delete pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --force --grace-period=0 2>/dev/null || true
-        kubectl delete ingress -n "$LIVEKIT_NAMESPACE" --all 2>/dev/null || true
-        sleep 3
+        
+        echo "   🔄 Step 3/4: Deleting ingress resources..."
+        kubectl delete ingress -n "$LIVEKIT_NAMESPACE" --all --timeout=30s 2>/dev/null || true
+        
+        echo "   🔄 Step 4/4: Deleting services..."
+        kubectl delete service -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --timeout=30s 2>/dev/null || true
+        
+        echo "   ⏳ Waiting 10 seconds for cleanup to settle..."
+        sleep 10
+        
+        # Verify cleanup
+        REMAINING_PODS=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --no-headers 2>/dev/null | wc -l || echo "0")
+        if [[ "$REMAINING_PODS" -gt 0 ]]; then
+            echo "   ⚠️  $REMAINING_PODS pods still exist, forcing final cleanup..."
+            kubectl patch pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
+            kubectl delete pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --force --grace-period=0 2>/dev/null || true
+        fi
+        
         echo "✅ Cleanup completed"
     else
         echo "✅ Existing deployment is healthy"
@@ -115,6 +136,14 @@ if helm list -n "$LIVEKIT_NAMESPACE" | grep -q "$HELM_RELEASE_NAME"; then
 else
     echo "ℹ️  No existing deployment found"
 fi
+
+# Final verification - ensure no helm release exists
+if helm list -n "$LIVEKIT_NAMESPACE" | grep -q "$HELM_RELEASE_NAME"; then
+    echo "⚠️  Helm release still exists, forcing removal..."
+    helm delete "$HELM_RELEASE_NAME" -n "$LIVEKIT_NAMESPACE" --no-hooks 2>/dev/null || true
+    sleep 5
+fi
+
 echo ""
 
 # =============================================================================
@@ -217,6 +246,12 @@ echo "📋 Step 5: Deploy LiveKit"
 echo "========================="
 
 echo "🔄 Installing LiveKit..."
+echo "   📦 Using chart version: $HELM_CHART_VERSION"
+echo "   🎯 Target namespace: $LIVEKIT_NAMESPACE"
+echo "   ⏱️  Timeout: 5 minutes"
+echo ""
+
+# Show installation progress
 if helm install "$HELM_RELEASE_NAME" livekit/livekit-server \
     --namespace "$LIVEKIT_NAMESPACE" \
     --values /tmp/livekit-values.yaml \
@@ -227,14 +262,41 @@ if helm install "$HELM_RELEASE_NAME" livekit/livekit-server \
 else
     echo "❌ LiveKit installation failed"
     
+<<<<<<< HEAD
     # Show pod logs - the most important info
     echo ""
     echo "🔍 Pod Logs:"
     POD_NAME=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+=======
+    # Show debugging info
+    echo ""
+    echo "🔍 Debugging Information:"
+    echo "========================"
+    
+    echo "📋 Helm Status:"
+    helm list -n "$LIVEKIT_NAMESPACE" || true
+    echo ""
+    
+    echo "📋 Pod Status:"
+    kubectl get pods -n "$LIVEKIT_NAMESPACE" || true
+    echo ""
+    
+    echo "📋 Pod Logs:"
+    POD_NAME=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+>>>>>>> 39c24d56b1a8480dad5d6c51b0f40813b6a70b16
     if [[ -n "$POD_NAME" ]]; then
+        echo "🔍 Logs from pod: $POD_NAME"
         kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=20 2>/dev/null || echo "No logs available"
+    else
+        echo "No pods found"
     fi
     echo ""
+<<<<<<< HEAD
+=======
+    
+    echo "📋 Recent Events:"
+    kubectl get events -n "$LIVEKIT_NAMESPACE" --sort-by='.lastTimestamp' | tail -10 || true
+>>>>>>> 39c24d56b1a8480dad5d6c51b0f40813b6a70b16
     
     exit 1
 fi
@@ -248,18 +310,30 @@ echo "📋 Step 6: Verify Deployment"
 echo "============================"
 
 echo "⏳ Waiting for pods to be ready..."
+echo "   🎯 Maximum wait time: 2 minutes"
+echo "   🔄 Checking every 5 seconds"
+echo ""
+
 for i in {1..24}; do
     READY_PODS=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --no-headers 2>/dev/null | grep -c "1/1.*Running" || echo "0")
     TOTAL_PODS=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --no-headers 2>/dev/null | wc -l || echo "0")
     
-    echo "   Pod status: $READY_PODS/$TOTAL_PODS ready (attempt $i/24)"
+    # Show progress bar
+    PROGRESS=$((i * 100 / 24))
+    printf "   [%3d%%] Pod status: %s/%s ready (attempt %d/24)\n" "$PROGRESS" "$READY_PODS" "$TOTAL_PODS" "$i"
     
     if [ "$READY_PODS" -gt 0 ] && [ "$READY_PODS" -eq "$TOTAL_PODS" ]; then
+        echo ""
         echo "✅ All pods are ready!"
         break
     fi
     
-    sleep 3
+    if [ "$i" -eq 24 ]; then
+        echo ""
+        echo "⚠️  Pods not ready after 2 minutes, but continuing..."
+    fi
+    
+    sleep 5
 done
 
 echo ""
