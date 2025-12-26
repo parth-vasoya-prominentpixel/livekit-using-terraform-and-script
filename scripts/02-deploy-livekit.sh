@@ -28,8 +28,8 @@ HELM_CHART_VERSION="1.5.2"
 echo "🔑 Setting up LiveKit API Keys..."
 
 # Use the validated keys from the test configuration
-API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
-API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
+API_KEY="${LIVEKIT_API_KEY:-livekitekstf}"
+API_SECRET="${LIVEKIT_API_SECRET:-f177d0cbdd9742ca199fa592b572df89ca738ec2647928dfbe443587956fa28c}"
 
 echo "✅ Using predefined API keys"
 echo "📋 API Key: $API_KEY"
@@ -225,7 +225,7 @@ redis:
   address: $REDIS_ENDPOINT
 
 keys:
-  "$API_KEY": "$API_SECRET"
+  $API_KEY: $API_SECRET
 
 metrics:
   enabled: true
