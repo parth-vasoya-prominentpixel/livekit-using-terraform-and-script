@@ -256,23 +256,24 @@ echo "📋 Step 4: Create Values Configuration"
 echo "======================================"
 
 cat > /tmp/livekit-values.yaml << EOF
-# LiveKit Configuration
 livekit:
   domain: $LIVEKIT_DOMAIN
   rtc:
     use_external_ip: true
     port_range_start: 50000
     port_range_end: 60000
-  # Try keys under livekit section
-  keys:
-    "$API_KEY": "$API_SECRET"
 
 redis:
   address: $REDIS_ENDPOINT
 
-# Also try keys at root level
 keys:
-  "$API_KEY": "$API_SECRET"
+  $API_KEY: $API_SECRET
+
+metrics:
+  enabled: true
+  prometheus:
+    enabled: true
+    port: 6789
 
 resources:
   requests:
@@ -281,6 +282,32 @@ resources:
   limits:
     cpu: 2000m
     memory: 2Gi
+
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+    - labelSelector:
+        matchExpressions:
+        - key: app
+          operator: In
+          values:
+          - livekit-livekit-server
+      topologyKey: "kubernetes.io/hostname"
+
+turn:
+  enabled: true
+  domain: $TURN_DOMAIN
+  tls_port: 3478
+  udp_port: 3478
+
+loadBalancer:
+  type: alb
+  tls:
+  - hosts:
+    - $LIVEKIT_DOMAIN
+    certificateArn: $CERTIFICATE_ARN
+
+hostNetwork: true
 
 service:
   type: NodePort
