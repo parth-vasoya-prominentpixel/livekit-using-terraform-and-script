@@ -262,12 +262,6 @@ if helm install "$HELM_RELEASE_NAME" livekit/livekit-server \
 else
     echo "❌ LiveKit installation failed"
     
-<<<<<<< HEAD
-    # Show pod logs - the most important info
-    echo ""
-    echo "🔍 Pod Logs:"
-    POD_NAME=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
-=======
     # Show debugging info
     echo ""
     echo "🔍 Debugging Information:"
@@ -283,7 +277,6 @@ else
     
     echo "📋 Pod Logs:"
     POD_NAME=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
->>>>>>> 39c24d56b1a8480dad5d6c51b0f40813b6a70b16
     if [[ -n "$POD_NAME" ]]; then
         echo "🔍 Logs from pod: $POD_NAME"
         kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=20 2>/dev/null || echo "No logs available"
@@ -291,12 +284,9 @@ else
         echo "No pods found"
     fi
     echo ""
-<<<<<<< HEAD
-=======
     
     echo "📋 Recent Events:"
     kubectl get events -n "$LIVEKIT_NAMESPACE" --sort-by='.lastTimestamp' | tail -10 || true
->>>>>>> 39c24d56b1a8480dad5d6c51b0f40813b6a70b16
     
     exit 1
 fi
