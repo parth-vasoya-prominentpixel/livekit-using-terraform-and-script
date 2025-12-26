@@ -24,87 +24,75 @@ CERTIFICATE_ARN="arn:aws:acm:us-east-1:918595516608:certificate/4523a895-7899-41
 HELM_RELEASE_NAME="livekit-server"
 HELM_CHART_VERSION="1.5.2"
 
-# LiveKit API Keys - Generate using LiveKit CLI
+# LiveKit API Keys - Generate using LiveKit server
 echo "🔑 Generating LiveKit API Keys..."
 
-# Check if lk CLI is available
-if ! command -v lk >/dev/null 2>&1; then
-    echo "📥 Installing LiveKit CLI..."
-    # Install LiveKit CLI
-    curl -sSL https://get.livekit.io | bash
+# Check if livekit-server is available (it was installed)
+if command -v livekit-server >/dev/null 2>&1; then
+    echo "✅ LiveKit server found, generating keys..."
     
-    # Add to PATH for current session
-    export PATH="$HOME/.livekit/bin:$PATH"
-    
-    # Verify installation
-    if command -v lk >/dev/null 2>&1; then
-        echo "✅ LiveKit CLI installed successfully"
-        lk --version || true
-    else
-        echo "❌ Failed to install LiveKit CLI"
-        echo "💡 Falling back to provided keys"
-        API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
-        API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
-    fi
-else
-    echo "✅ LiveKit CLI already available"
-    lk --version || true
-fi
-
-# Generate new API keys using LiveKit CLI
-if command -v lk >/dev/null 2>&1; then
+    # Generate keys using livekit-server
     echo "🔧 Generating new API key pair..."
     
-    # Try different commands to generate keys
-    if lk generate-keys >/dev/null 2>&1; then
-        KEY_OUTPUT=$(lk generate-keys 2>/dev/null)
-    elif lk create-keys >/dev/null 2>&1; then
-        KEY_OUTPUT=$(lk create-keys 2>/dev/null)
-    elif lk keys generate >/dev/null 2>&1; then
-        KEY_OUTPUT=$(lk keys generate 2>/dev/null)
-    else
-        echo "🔍 Available lk commands:"
-        lk --help | grep -E "(generate|create|keys)" || true
+    # Use livekit-server to generate keys
+    KEY_OUTPUT=$(livekit-server generate-keys 2>/dev/null || echo "")
+    
+    if [[ -z "$KEY_OUTPUT" ]]; then
+        # Try alternative command
+        KEY_OUTPUT=$(livekit-server --generate-keys 2>/dev/null || echo "")
+    fi
+    
+    if [[ -z "$KEY_OUTPUT" ]]; then
+        # Show available options
+        echo "🔍 Available livekit-server options:"
+        livekit-server --help | grep -i key || true
         echo ""
-        echo "⚠️ Could not find key generation command, using provided keys"
-        API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
-        API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
-        KEY_OUTPUT=""
     fi
     
     if [[ -n "$KEY_OUTPUT" ]]; then
         echo "✅ Generated keys output:"
         echo "$KEY_OUTPUT"
-        echo ""
         
-        # Try to parse the output
-        if echo "$KEY_OUTPUT" | grep -q "API Key\|api.*key"; then
-            API_KEY=$(echo "$KEY_OUTPUT" | grep -i "api.*key" | head -1 | sed 's/.*: *//' | awk '{print $1}')
-            API_SECRET=$(echo "$KEY_OUTPUT" | grep -i "secret" | head -1 | sed 's/.*: *//' | awk '{print $1}')
+        # Parse the output - LiveKit typically outputs in format "key: secret"
+        if echo "$KEY_OUTPUT" | grep -q ":"; then
+            API_KEY=$(echo "$KEY_OUTPUT" | head -1 | cut -d':' -f1 | xargs)
+            API_SECRET=$(echo "$KEY_OUTPUT" | head -1 | cut -d':' -f2 | xargs)
             
             if [[ -n "$API_KEY" ]] && [[ -n "$API_SECRET" ]]; then
                 echo "✅ Successfully parsed generated keys"
                 echo "📋 API Key: $API_KEY"
                 echo "📋 API Secret: ${API_SECRET:0:20}..."
             else
-                echo "⚠️ Could not parse keys from output, using provided keys"
+                echo "⚠️ Could not parse keys, using provided keys"
                 API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
                 API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
             fi
         else
-            echo "⚠️ Unexpected key output format, using provided keys"
+            echo "⚠️ Unexpected key format, using provided keys"
             API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
             API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
         fi
     else
-        echo "⚠️ No key output received, using provided keys"
-        API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
-        API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
+        echo "⚠️ No key output, manually generating keys..."
+        
+        # Generate keys manually in the correct format
+        API_KEY="API$(openssl rand -hex 8)"
+        API_SECRET=$(openssl rand -base64 32)
+        
+        echo "✅ Generated keys manually"
+        echo "📋 API Key: $API_KEY"
+        echo "📋 API Secret: ${API_SECRET:0:20}..."
     fi
 else
-    echo "⚠️ LiveKit CLI not available, using provided keys"
-    API_KEY="${LIVEKIT_API_KEY:-APIKmrHi78hxpbd}"
-    API_SECRET="${LIVEKIT_API_SECRET:-Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB}"
+    echo "⚠️ LiveKit server not found, manually generating keys..."
+    
+    # Generate keys manually in the correct format
+    API_KEY="API$(openssl rand -hex 8)"
+    API_SECRET=$(openssl rand -base64 32)
+    
+    echo "✅ Generated keys manually using OpenSSL"
+    echo "📋 API Key: $API_KEY"
+    echo "📋 API Secret: ${API_SECRET:0:20}..."
 fi
 
 echo ""
@@ -268,20 +256,23 @@ echo "📋 Step 4: Create Values Configuration"
 echo "======================================"
 
 cat > /tmp/livekit-values.yaml << EOF
-# LiveKit Configuration - Back to basics
+# LiveKit Configuration
 livekit:
   domain: $LIVEKIT_DOMAIN
   rtc:
     use_external_ip: true
     port_range_start: 50000
     port_range_end: 60000
+  # Try keys under livekit section
+  keys:
+    "$API_KEY": "$API_SECRET"
 
 redis:
   address: $REDIS_ENDPOINT
 
-# Keys at root level - this is the standard
+# Also try keys at root level
 keys:
-  $API_KEY: $API_SECRET
+  "$API_KEY": "$API_SECRET"
 
 resources:
   requests:
@@ -317,6 +308,13 @@ ingress:
 EOF
 
 echo "✅ Values configuration created"
+
+# Debug: Show the keys section of the generated values
+echo ""
+echo "🔍 Keys configuration in values.yaml:"
+echo "======================================"
+grep -A 5 "keys:" /tmp/livekit-values.yaml | sed 's/: .*/: [REDACTED]/' || echo "❌ No keys section found!"
+echo "======================================"
 echo ""
 
 # =============================================================================
