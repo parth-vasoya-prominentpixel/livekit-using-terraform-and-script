@@ -91,7 +91,7 @@ echo "🧹 Cleaning up any existing deployment..."
 if helm list -n "$LIVEKIT_NAMESPACE" 2>/dev/null | grep -q "$HELM_RELEASE_NAME"; then
     echo "🗑️ Removing existing Helm release..."
     helm uninstall "$HELM_RELEASE_NAME" -n "$LIVEKIT_NAMESPACE" --timeout 60s || true
-    sleep 15
+    sleep 3
 fi
 
 # Force cleanup resources
@@ -242,7 +242,7 @@ if helm install "$HELM_RELEASE_NAME" livekit/livekit-server \
     --namespace "$LIVEKIT_NAMESPACE" \
     --values /tmp/livekit-values.yaml \
     --version "$HELM_CHART_VERSION" \
-    --timeout 10m \
+    --timeout 3m \
     --wait; then
     echo "✅ LiveKit deployment successful!"
 else
@@ -306,7 +306,7 @@ for i in {1..20}; do
     fi
     
     echo "   Waiting for ALB DNS... (attempt $i/20)"
-    sleep 10
+    sleep 7
 done
 
 if [[ -z "$ALB_DNS" || "$ALB_DNS" == "null" ]]; then
