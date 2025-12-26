@@ -1,13 +1,12 @@
 #!/bin/bash
 
-# LiveKit Deployment Script for EKS
-# Clean, simple deployment based on official LiveKit documentation
-# https://docs.livekit.io/realtime/self-hosting/deployment/
+# Fresh LiveKit Deployment Script
+# Simple and clean approach using provided YAML configuration
 
 set -euo pipefail
 
-echo "🎥 LiveKit Server Deployment"
-echo "============================"
+echo "🎥 Fresh LiveKit Deployment"
+echo "==========================="
 echo "📅 Started at: $(date)"
 echo ""
 
@@ -20,25 +19,26 @@ CLUSTER_NAME="${CLUSTER_NAME:-}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 REDIS_ENDPOINT="${REDIS_ENDPOINT:-}"
 
-# LiveKit configuration
+# LiveKit configuration - using your specified values
 LIVEKIT_NAMESPACE="livekit"
 LIVEKIT_DOMAIN="livekit-eks-tf.digi-telephony.com"
+TURN_DOMAIN="turn-eks-tf.digi-telephony.com"
 CERTIFICATE_ARN="arn:aws:acm:us-east-1:918595516608:certificate/4523a895-7899-41a3-8589-2a5baed3b420"
 HELM_RELEASE_NAME="livekit-server"
 HELM_CHART_VERSION="1.5.2"
 
-# Generate LiveKit API keys (standard format)
-API_KEY="API$(openssl rand -hex 8)"
-API_SECRET=$(openssl rand -base64 32)
+# API Keys from your configuration
+API_KEY="APIKmrHi78hxpbd"
+API_SECRET="Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB"
 
 echo "📋 Configuration:"
 echo "   Cluster: $CLUSTER_NAME"
 echo "   Region: $AWS_REGION"
 echo "   Namespace: $LIVEKIT_NAMESPACE"
 echo "   Domain: $LIVEKIT_DOMAIN"
+echo "   TURN Domain: $TURN_DOMAIN"
 echo "   Redis: $REDIS_ENDPOINT"
 echo "   API Key: $API_KEY"
-echo "   API Secret: ${API_SECRET:0:20}..."
 echo ""
 
 # Validate required variables
@@ -82,27 +82,28 @@ echo "✅ Connected to cluster with $NODE_COUNT nodes"
 echo ""
 
 # =============================================================================
-# CLEANUP EXISTING DEPLOYMENT
+# CLEANUP
 # =============================================================================
 
-echo "🧹 Cleaning up existing deployment..."
+echo "🧹 Cleaning up any existing deployment..."
 
-# Remove existing Helm release if it exists
+# Remove existing Helm release
 if helm list -n "$LIVEKIT_NAMESPACE" 2>/dev/null | grep -q "$HELM_RELEASE_NAME"; then
     echo "🗑️ Removing existing Helm release..."
     helm uninstall "$HELM_RELEASE_NAME" -n "$LIVEKIT_NAMESPACE" --timeout 60s || true
-    sleep 10
+    sleep 15
 fi
 
-# Force cleanup any remaining resources
+# Force cleanup resources
 kubectl delete pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --force --grace-period=0 2>/dev/null || true
 kubectl delete ingress -n "$LIVEKIT_NAMESPACE" --all --timeout=30s 2>/dev/null || true
+kubectl delete service -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --timeout=30s 2>/dev/null || true
 
 echo "✅ Cleanup completed"
 echo ""
 
 # =============================================================================
-# NAMESPACE SETUP
+# NAMESPACE
 # =============================================================================
 
 echo "📦 Setting up namespace..."
@@ -111,7 +112,7 @@ if ! kubectl get namespace "$LIVEKIT_NAMESPACE" >/dev/null 2>&1; then
     kubectl create namespace "$LIVEKIT_NAMESPACE"
     echo "✅ Namespace '$LIVEKIT_NAMESPACE' created"
 else
-    echo "✅ Namespace '$LIVEKIT_NAMESPACE' already exists"
+    echo "✅ Namespace '$LIVEKIT_NAMESPACE' exists"
 fi
 echo ""
 
@@ -125,135 +126,106 @@ if ! helm repo list 2>/dev/null | grep -q "livekit"; then
     helm repo add livekit https://helm.livekit.io
     echo "✅ LiveKit repository added"
 else
-    echo "✅ LiveKit repository already exists"
+    echo "✅ LiveKit repository exists"
 fi
 
 helm repo update
-echo "✅ Helm repositories updated"
+echo "✅ Repositories updated"
 echo ""
 
 # =============================================================================
 # VALUES CONFIGURATION
 # =============================================================================
 
-echo "⚙️ Creating Helm values configuration..."
+echo "⚙️ Creating values configuration..."
 
 cat > /tmp/livekit-values.yaml << EOF
-# LiveKit Server Configuration
-# Based on official documentation: https://docs.livekit.io/realtime/self-hosting/deployment/
-
-# Core LiveKit configuration
 livekit:
-  # Domain for LiveKit server
-  domain: $LIVEKIT_DOMAIN
-  
-  # RTC configuration for WebRTC
+  domain: livekit-eks-tf.digi-telephony.com
   rtc:
     use_external_ip: true
     port_range_start: 50000
     port_range_end: 60000
-    
-  # Logging configuration
-  log_level: info
 
-# Redis configuration for state management
 redis:
   address: $REDIS_ENDPOINT
 
-# API Keys for authentication
 keys:
-    APIKmrHi78hxpbd: Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB
+  APIKmrHi78hxpbd: Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB
 
-# Resource limits
-resources:
-  requests:
-    cpu: 500m
-    memory: 1Gi
-  limits:
-    cpu: 2000m
-    memory: 4Gi
-
-# Service configuration
-service:
-  type: ClusterIP
-  annotations: {}
-
-# Ingress configuration for ALB
-ingress:
-  enabled: true
-  className: "alb"
-  annotations:
-    # ALB configuration
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
-    alb.ingress.kubernetes.io/ssl-redirect: '443'
-    alb.ingress.kubernetes.io/certificate-arn: $CERTIFICATE_ARN
-    alb.ingress.kubernetes.io/backend-protocol: HTTP
-    alb.ingress.kubernetes.io/healthcheck-path: /
-    alb.ingress.kubernetes.io/success-codes: '200'
-    alb.ingress.kubernetes.io/healthcheck-interval-seconds: '30'
-    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
-    alb.ingress.kubernetes.io/healthy-threshold-count: '2'
-    alb.ingress.kubernetes.io/unhealthy-threshold-count: '3'
-  hosts:
-    - host: $LIVEKIT_DOMAIN
-      paths:
-        - path: /
-          pathType: Prefix
-  tls:
-    - hosts:
-        - $LIVEKIT_DOMAIN
-
-# Metrics and monitoring
 metrics:
   enabled: true
   prometheus:
     enabled: true
     port: 6789
 
-# Pod configuration
-replicaCount: 1
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
 
-# Security context
-securityContext:
-  runAsNonRoot: true
-  runAsUser: 1000
-  fsGroup: 1000
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+    - labelSelector:
+        matchExpressions:
+        - key: app
+          operator: In
+          values:
+          - livekit-livekit-server
+      topologyKey: "kubernetes.io/hostname"
 
-# Node selection
-nodeSelector: {}
-tolerations: []
-affinity: {}
+turn:
+  enabled: true
+  domain: turn-eks-tf.digi-telephony.com
+  tls_port: 3478
+  udp_port: 3478
 
-# Liveness and readiness probes
-livenessProbe:
-  httpGet:
-    path: /
-    port: 7880
-  initialDelaySeconds: 30
-  periodSeconds: 10
-  timeoutSeconds: 5
-  failureThreshold: 3
+loadBalancer:
+  type: alb
+  tls:
+  - hosts:
+    - livekit-eks-tf.digi-telephony.com
+    certificateArn: arn:aws:acm:us-east-1:918595516608:certificate/4523a895-7899-41a3-8589-2a5baed3b420
 
-readinessProbe:
-  httpGet:
-    path: /
-    port: 7880
-  initialDelaySeconds: 10
-  periodSeconds: 5
-  timeoutSeconds: 3
-  failureThreshold: 3
+service:
+  type: NodePort
+
+ingress:
+  enabled: true
+  ingressClassName: "alb"
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: '443'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:us-east-1:918595516608:certificate/4523a895-7899-41a3-8589-2a5baed3b420
+    alb.ingress.kubernetes.io/backend-protocol: HTTP
+    alb.ingress.kubernetes.io/healthcheck-path: /
+    alb.ingress.kubernetes.io/success-codes: '200'
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: '30'
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
+  hosts:
+  - host: livekit-eks-tf.digi-telephony.com
+    paths:
+    - path: /
+      pathType: Prefix
+  tls:
+  - hosts:
+    - livekit-eks-tf.digi-telephony.com
 EOF
 
 echo "✅ Values configuration created"
 echo ""
 
-# Show the configuration for debugging
-echo "🔍 Generated configuration:"
-echo "=========================="
+# Show the complete configuration
+echo "🔍 Complete values.yaml configuration:"
+echo "======================================"
 cat /tmp/livekit-values.yaml
-echo "=========================="
+echo "======================================"
 echo ""
 
 # =============================================================================
@@ -272,7 +244,7 @@ if helm install "$HELM_RELEASE_NAME" livekit/livekit-server \
     --version "$HELM_CHART_VERSION" \
     --timeout 10m \
     --wait; then
-    echo "✅ LiveKit deployment successful"
+    echo "✅ LiveKit deployment successful!"
 else
     echo "❌ LiveKit deployment failed"
     
@@ -297,7 +269,7 @@ else
     fi
     echo ""
     
-    echo "📋 Events:"
+    echo "📋 Recent Events:"
     kubectl get events -n "$LIVEKIT_NAMESPACE" --sort-by='.lastTimestamp' | tail -20 || true
     
     exit 1
@@ -314,7 +286,6 @@ echo "✅ Verifying deployment..."
 echo "⏳ Waiting for pods to be ready (max 3 minutes)..."
 kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=livekit-server -n "$LIVEKIT_NAMESPACE" --timeout=180s || true
 
-# Get deployment status
 echo ""
 echo "📋 Final Status Check:"
 kubectl get deployment -n "$LIVEKIT_NAMESPACE"
@@ -339,7 +310,7 @@ for i in {1..20}; do
 done
 
 if [[ -z "$ALB_DNS" || "$ALB_DNS" == "null" ]]; then
-    echo "⚠️ ALB DNS not available yet (this may take a few minutes)"
+    echo "⚠️ ALB DNS not available yet"
     ALB_DNS="pending"
 fi
 echo ""
@@ -354,6 +325,7 @@ echo "✅ LiveKit Server deployed successfully!"
 echo ""
 echo "📋 Connection Details:"
 echo "   Domain: https://$LIVEKIT_DOMAIN"
+echo "   TURN Domain: $TURN_DOMAIN"
 echo "   WebSocket URL: wss://$LIVEKIT_DOMAIN"
 echo "   ALB DNS: $ALB_DNS"
 echo ""
@@ -365,7 +337,7 @@ echo "📋 Next Steps:"
 echo "   1. Wait 5-10 minutes for ALB to be fully provisioned"
 echo "   2. Update Route 53 DNS to point $LIVEKIT_DOMAIN to $ALB_DNS"
 echo "   3. Test connection: curl -I https://$LIVEKIT_DOMAIN"
-echo "   4. Use the API credentials above in your LiveKit client applications"
+echo "   4. Use the API credentials in your LiveKit applications"
 echo ""
 
 # Cleanup
