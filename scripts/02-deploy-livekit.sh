@@ -1,61 +1,47 @@
 #!/bin/bash
 
-# LiveKit Deployment Script for EKS - Clean and Simple
-# Deploys LiveKit Server with ALB, SSL certificates, and Route 53 configuration
+# LiveKit Deployment Script for EKS
+# Clean, simple deployment based on official LiveKit documentation
+# https://docs.livekit.io/realtime/self-hosting/deployment/
 
 set -euo pipefail
 
-echo "🎥 LiveKit Deployment Script"
+echo "🎥 LiveKit Server Deployment"
 echo "============================"
 echo "📅 Started at: $(date)"
 echo ""
 
-# Configuration from environment variables
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
+# Required environment variables
 CLUSTER_NAME="${CLUSTER_NAME:-}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
-ENVIRONMENT="${ENVIRONMENT:-dev}"
 REDIS_ENDPOINT="${REDIS_ENDPOINT:-}"
 
-# LiveKit Configuration
+# LiveKit configuration
 LIVEKIT_NAMESPACE="livekit"
-LIVEKIT_DOMAIN="${LIVEKIT_DOMAIN:-livekit-eks-tf.digi-telephony.com}"
-TURN_DOMAIN="${TURN_DOMAIN:-turn-eks-tf.digi-telephony.com}"
+LIVEKIT_DOMAIN="livekit-eks-tf.digi-telephony.com"
 CERTIFICATE_ARN="arn:aws:acm:us-east-1:918595516608:certificate/4523a895-7899-41a3-8589-2a5baed3b420"
 HELM_RELEASE_NAME="livekit-server"
 HELM_CHART_VERSION="1.5.2"
 
-# LiveKit API Keys - Use predefined keys for consistency
-echo "🔑 Setting up LiveKit API Keys..."
+# Generate LiveKit API keys (standard format)
+API_KEY="API$(openssl rand -hex 8)"
+API_SECRET=$(openssl rand -base64 32)
 
-# Use the validated keys from the test configuration
-API_KEY="${LIVEKIT_API_KEY:-livekitekstf}"
-API_SECRET="${LIVEKIT_API_SECRET:-f177d0cbdd9742ca199fa592b572df89ca738ec2647928dfbe443587956fa28c}"
-
-echo "✅ Using predefined API keys"
-echo "📋 API Key: $API_KEY"
-echo "📋 API Secret: ${API_SECRET:0:20}..."
-
-# Validate key format
-if [[ ${#API_KEY} -lt 10 ]]; then
-    echo "❌ API Key too short (${#API_KEY} characters)"
-    exit 1
-fi
-
-if [[ ${#API_SECRET} -lt 20 ]]; then
-    echo "❌ API Secret too short (${#API_SECRET} characters)"
-    exit 1
-fi
-
-# Test if secret is valid base64
-if echo "$API_SECRET" | base64 -d >/dev/null 2>&1; then
-    echo "✅ API Secret is valid base64 format"
-else
-    echo "⚠️ API Secret may not be valid base64, but continuing..."
-fi
-
+echo "📋 Configuration:"
+echo "   Cluster: $CLUSTER_NAME"
+echo "   Region: $AWS_REGION"
+echo "   Namespace: $LIVEKIT_NAMESPACE"
+echo "   Domain: $LIVEKIT_DOMAIN"
+echo "   Redis: $REDIS_ENDPOINT"
+echo "   API Key: $API_KEY"
+echo "   API Secret: ${API_SECRET:0:20}..."
 echo ""
 
-# Validate required environment variables
+# Validate required variables
 if [[ -z "$CLUSTER_NAME" ]]; then
     echo "❌ CLUSTER_NAME environment variable is required"
     exit 1
@@ -66,140 +52,80 @@ if [[ -z "$REDIS_ENDPOINT" ]]; then
     exit 1
 fi
 
-echo "📋 Configuration:"
-echo "   Cluster: $CLUSTER_NAME"
-echo "   Region: $AWS_REGION"
-echo "   Environment: $ENVIRONMENT"
-echo "   Namespace: $LIVEKIT_NAMESPACE"
-echo "   Domain: $LIVEKIT_DOMAIN"
-echo "   TURN Domain: $TURN_DOMAIN"
-echo "   Redis: $REDIS_ENDPOINT"
-echo "   API Key: $API_KEY"
-echo ""
+# =============================================================================
+# PREREQUISITES
+# =============================================================================
 
-# Function to check if command exists
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
-}
+echo "🔧 Checking prerequisites..."
 
-# Verify required tools
-echo "🔧 Verifying required tools..."
-for tool in aws kubectl helm jq; do
-    if command_exists "$tool"; then
-        echo "✅ $tool: available"
-    else
-        echo "❌ $tool: not found"
+# Check required tools
+for tool in aws kubectl helm; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        echo "❌ $tool is required but not installed"
         exit 1
     fi
+    echo "✅ $tool: available"
 done
-echo ""
-
-# Get AWS account ID
-echo "🔐 Getting AWS account information..."
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-echo "✅ Account ID: $ACCOUNT_ID"
-echo ""
 
 # Update kubeconfig
 echo "🔧 Updating kubeconfig..."
 aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME"
-echo "✅ Kubeconfig updated"
-echo ""
 
 # Verify cluster connectivity
-echo "🔍 Verifying cluster connectivity..."
-if kubectl get nodes >/dev/null 2>&1; then
-    NODE_COUNT=$(kubectl get nodes --no-headers | wc -l)
-    echo "✅ Connected to cluster with $NODE_COUNT nodes"
-else
-    echo "❌ Cannot connect to cluster"
+if ! kubectl get nodes >/dev/null 2>&1; then
+    echo "❌ Cannot connect to Kubernetes cluster"
     exit 1
 fi
+
+NODE_COUNT=$(kubectl get nodes --no-headers | wc -l)
+echo "✅ Connected to cluster with $NODE_COUNT nodes"
 echo ""
 
 # =============================================================================
-# STEP 1: CLEANUP EXISTING FAILED DEPLOYMENTS
+# CLEANUP EXISTING DEPLOYMENT
 # =============================================================================
 
-echo "📋 Step 1: Cleanup Existing Failed Deployments"
-echo "=============================================="
+echo "🧹 Cleaning up existing deployment..."
 
-if helm list -n "$LIVEKIT_NAMESPACE" | grep -q "$HELM_RELEASE_NAME"; then
-    RELEASE_STATUS=$(helm list -n "$LIVEKIT_NAMESPACE" -f "$HELM_RELEASE_NAME" -o json | jq -r '.[0].status' 2>/dev/null || echo "unknown")
-    
-    echo "ℹ️  Found existing deployment with status: $RELEASE_STATUS"
-    
-    if [[ "$RELEASE_STATUS" != "deployed" ]]; then
-        echo "🗑️ Removing failed deployment..."
-        
-        # Force cleanup without waiting for graceful shutdown
-        echo "   🔄 Step 1/4: Removing Helm release (no wait)..."
-        helm uninstall "$HELM_RELEASE_NAME" -n "$LIVEKIT_NAMESPACE" --timeout 30s 2>/dev/null || true
-        
-        echo "   🔄 Step 2/4: Force deleting pods..."
-        kubectl delete pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --force --grace-period=0 2>/dev/null || true
-        
-        echo "   🔄 Step 3/4: Deleting ingress resources..."
-        kubectl delete ingress -n "$LIVEKIT_NAMESPACE" --all --timeout=30s 2>/dev/null || true
-        
-        echo "   🔄 Step 4/4: Deleting services..."
-        kubectl delete service -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --timeout=30s 2>/dev/null || true
-        
-        echo "   ⏳ Waiting 10 seconds for cleanup to settle..."
-        sleep 10
-        
-        # Verify cleanup
-        REMAINING_PODS=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --no-headers 2>/dev/null | wc -l || echo "0")
-        if [[ "$REMAINING_PODS" -gt 0 ]]; then
-            echo "   ⚠️  $REMAINING_PODS pods still exist, forcing final cleanup..."
-            kubectl patch pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server -p '{"metadata":{"finalizers":[]}}' 2>/dev/null || true
-            kubectl delete pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --force --grace-period=0 2>/dev/null || true
-        fi
-        
-        echo "✅ Cleanup completed"
-    else
-        echo "✅ Existing deployment is healthy"
-    fi
-else
-    echo "ℹ️  No existing deployment found"
+# Remove existing Helm release if it exists
+if helm list -n "$LIVEKIT_NAMESPACE" 2>/dev/null | grep -q "$HELM_RELEASE_NAME"; then
+    echo "🗑️ Removing existing Helm release..."
+    helm uninstall "$HELM_RELEASE_NAME" -n "$LIVEKIT_NAMESPACE" --timeout 60s || true
+    sleep 10
 fi
 
-# Final verification - ensure no helm release exists
-if helm list -n "$LIVEKIT_NAMESPACE" | grep -q "$HELM_RELEASE_NAME"; then
-    echo "⚠️  Helm release still exists, forcing removal..."
-    helm delete "$HELM_RELEASE_NAME" -n "$LIVEKIT_NAMESPACE" --no-hooks 2>/dev/null || true
-    sleep 5
-fi
+# Force cleanup any remaining resources
+kubectl delete pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --force --grace-period=0 2>/dev/null || true
+kubectl delete ingress -n "$LIVEKIT_NAMESPACE" --all --timeout=30s 2>/dev/null || true
 
+echo "✅ Cleanup completed"
 echo ""
 
 # =============================================================================
-# STEP 2: CREATE NAMESPACE
+# NAMESPACE SETUP
 # =============================================================================
 
-echo "📋 Step 2: Create Namespace"
-echo "==========================="
+echo "📦 Setting up namespace..."
 
-if kubectl get namespace "$LIVEKIT_NAMESPACE" >/dev/null 2>&1; then
-    echo "✅ Namespace '$LIVEKIT_NAMESPACE' already exists"
-else
+if ! kubectl get namespace "$LIVEKIT_NAMESPACE" >/dev/null 2>&1; then
     kubectl create namespace "$LIVEKIT_NAMESPACE"
     echo "✅ Namespace '$LIVEKIT_NAMESPACE' created"
+else
+    echo "✅ Namespace '$LIVEKIT_NAMESPACE' already exists"
 fi
 echo ""
 
 # =============================================================================
-# STEP 3: ADD HELM REPOSITORY
+# HELM REPOSITORY
 # =============================================================================
 
-echo "📋 Step 3: Add Helm Repository"
-echo "=============================="
+echo "📚 Setting up Helm repository..."
 
-if helm repo list | grep -q "livekit"; then
-    echo "✅ LiveKit repository already added"
-else
+if ! helm repo list 2>/dev/null | grep -q "livekit"; then
     helm repo add livekit https://helm.livekit.io
     echo "✅ LiveKit repository added"
+else
+    echo "✅ LiveKit repository already exists"
 fi
 
 helm repo update
@@ -207,73 +133,57 @@ echo "✅ Helm repositories updated"
 echo ""
 
 # =============================================================================
-# STEP 4: CREATE VALUES CONFIGURATION
+# VALUES CONFIGURATION
 # =============================================================================
 
-echo "📋 Step 4: Create Values Configuration"
-echo "======================================"
+echo "⚙️ Creating Helm values configuration..."
 
 cat > /tmp/livekit-values.yaml << EOF
+# LiveKit Server Configuration
+# Based on official documentation: https://docs.livekit.io/realtime/self-hosting/deployment/
+
+# Core LiveKit configuration
 livekit:
+  # Domain for LiveKit server
   domain: $LIVEKIT_DOMAIN
+  
+  # RTC configuration for WebRTC
   rtc:
     use_external_ip: true
     port_range_start: 50000
     port_range_end: 60000
+    
+  # Logging configuration
+  log_level: info
 
+# Redis configuration for state management
 redis:
   address: $REDIS_ENDPOINT
 
+# API Keys for authentication
 keys:
-  $API_KEY: $API_SECRET
+  "$API_KEY": "$API_SECRET"
 
-metrics:
-  enabled: true
-  prometheus:
-    enabled: true
-    port: 6789
-
+# Resource limits
 resources:
   requests:
     cpu: 500m
-    memory: 512Mi
+    memory: 1Gi
   limits:
     cpu: 2000m
-    memory: 2Gi
+    memory: 4Gi
 
-affinity:
-  podAntiAffinity:
-    requiredDuringSchedulingIgnoredDuringExecution:
-    - labelSelector:
-        matchExpressions:
-        - key: app
-          operator: In
-          values:
-          - livekit-livekit-server
-      topologyKey: "kubernetes.io/hostname"
-
-turn:
-  enabled: true
-  domain: $TURN_DOMAIN
-  tls_port: 3478
-  udp_port: 3478
-
-loadBalancer:
-  type: alb
-  tls:
-  - hosts:
-    - $LIVEKIT_DOMAIN
-    certificateArn: $CERTIFICATE_ARN
-
-hostNetwork: true
-
+# Service configuration
 service:
-  type: NodePort
+  type: ClusterIP
+  annotations: {}
 
+# Ingress configuration for ALB
 ingress:
   enabled: true
-  ingressClassName: "alb"
+  className: "alb"
   annotations:
+    # ALB configuration
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
@@ -282,160 +192,141 @@ ingress:
     alb.ingress.kubernetes.io/backend-protocol: HTTP
     alb.ingress.kubernetes.io/healthcheck-path: /
     alb.ingress.kubernetes.io/success-codes: '200'
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: '30'
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: '5'
+    alb.ingress.kubernetes.io/healthy-threshold-count: '2'
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: '3'
   hosts:
-  - host: $LIVEKIT_DOMAIN
-    paths:
-    - path: /
-      pathType: Prefix
+    - host: $LIVEKIT_DOMAIN
+      paths:
+        - path: /
+          pathType: Prefix
   tls:
-  - hosts:
-    - $LIVEKIT_DOMAIN
+    - hosts:
+        - $LIVEKIT_DOMAIN
+
+# Metrics and monitoring
+metrics:
+  enabled: true
+  prometheus:
+    enabled: true
+    port: 6789
+
+# Pod configuration
+replicaCount: 1
+
+# Security context
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+# Node selection
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Liveness and readiness probes
+livenessProbe:
+  httpGet:
+    path: /
+    port: 7880
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /
+    port: 7880
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
 EOF
 
 echo "✅ Values configuration created"
-
-# Debug: Show the keys section of the generated values
-echo ""
-echo "🔍 Keys configuration in values.yaml:"
-echo "======================================"
-grep -A 5 "keys:" /tmp/livekit-values.yaml || echo "❌ No keys section found!"
-echo "======================================"
 echo ""
 
-# Also show the complete values file for debugging
-echo "🔍 Complete values.yaml file:"
-echo "=============================="
+# Show the configuration for debugging
+echo "🔍 Generated configuration:"
+echo "=========================="
 cat /tmp/livekit-values.yaml
-echo "=============================="
-echo ""
-
-# Validate the YAML syntax
-echo "🔍 Validating YAML syntax..."
-if python3 -c "import yaml; yaml.safe_load(open('/tmp/livekit-values.yaml'))" 2>/dev/null; then
-    echo "✅ YAML syntax is valid"
-elif python -c "import yaml; yaml.safe_load(open('/tmp/livekit-values.yaml'))" 2>/dev/null; then
-    echo "✅ YAML syntax is valid"
-else
-    echo "⚠️ Could not validate YAML syntax (python/python3 not available)"
-fi
-
-# Check if keys section exists and is properly formatted
-if grep -q "^keys:" /tmp/livekit-values.yaml; then
-    echo "✅ Keys section found in values.yaml"
-    KEY_COUNT=$(grep -A 10 "^keys:" /tmp/livekit-values.yaml | grep -c ":")
-    echo "📋 Found $KEY_COUNT key entries"
-else
-    echo "❌ Keys section not found in values.yaml!"
-    exit 1
-fi
+echo "=========================="
 echo ""
 
 # =============================================================================
-# STEP 5: DEPLOY LIVEKIT
+# DEPLOYMENT
 # =============================================================================
 
-echo "📋 Step 5: Deploy LiveKit"
-echo "========================="
-
-echo "🔄 Installing LiveKit..."
-echo "   📦 Using chart version: $HELM_CHART_VERSION"
-echo "   🎯 Target namespace: $LIVEKIT_NAMESPACE"
-echo "   ⏱️  Timeout: 5 minutes"
+echo "🚀 Deploying LiveKit Server..."
+echo "   📦 Chart version: $HELM_CHART_VERSION"
+echo "   🎯 Namespace: $LIVEKIT_NAMESPACE"
+echo "   ⏱️ Timeout: 10 minutes"
 echo ""
 
-# Show installation progress
 if helm install "$HELM_RELEASE_NAME" livekit/livekit-server \
     --namespace "$LIVEKIT_NAMESPACE" \
     --values /tmp/livekit-values.yaml \
     --version "$HELM_CHART_VERSION" \
-    --timeout 5m \
+    --timeout 10m \
     --wait; then
-    echo "✅ LiveKit installation completed"
+    echo "✅ LiveKit deployment successful"
 else
-    echo "❌ LiveKit installation failed"
+    echo "❌ LiveKit deployment failed"
     
-    # Show debugging info
+    # Debug information
     echo ""
-    echo "🔍 Debugging Information:"
-    echo "========================"
+    echo "🔍 Debug Information:"
+    echo "===================="
     
     echo "📋 Helm Status:"
     helm list -n "$LIVEKIT_NAMESPACE" || true
     echo ""
     
     echo "📋 Pod Status:"
-    kubectl get pods -n "$LIVEKIT_NAMESPACE" || true
+    kubectl get pods -n "$LIVEKIT_NAMESPACE" -o wide || true
     echo ""
     
     echo "📋 Pod Logs:"
-    POD_NAME=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    POD_NAME=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
     if [[ -n "$POD_NAME" ]]; then
         echo "🔍 Logs from pod: $POD_NAME"
-        kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=20 2>/dev/null || echo "No logs available"
-    else
-        echo "No pods found"
+        kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=50 || true
     fi
     echo ""
     
-    echo "📋 Recent Events:"
-    kubectl get events -n "$LIVEKIT_NAMESPACE" --sort-by='.lastTimestamp' | tail -10 || true
+    echo "📋 Events:"
+    kubectl get events -n "$LIVEKIT_NAMESPACE" --sort-by='.lastTimestamp' | tail -20 || true
     
     exit 1
 fi
 echo ""
 
 # =============================================================================
-# STEP 6: VERIFY DEPLOYMENT
+# VERIFICATION
 # =============================================================================
 
-echo "📋 Step 6: Verify Deployment"
-echo "============================"
+echo "✅ Verifying deployment..."
 
-echo "⏳ Waiting for pods to be ready..."
-echo "   🎯 Maximum wait time: 2 minutes"
-echo "   🔄 Checking every 5 seconds"
+# Wait for pods to be ready
+echo "⏳ Waiting for pods to be ready (max 3 minutes)..."
+kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=livekit-server -n "$LIVEKIT_NAMESPACE" --timeout=180s || true
+
+# Get deployment status
 echo ""
-
-for i in {1..24}; do
-    READY_PODS=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --no-headers 2>/dev/null | grep -c "1/1.*Running" || echo "0")
-    TOTAL_PODS=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --no-headers 2>/dev/null | wc -l || echo "0")
-    
-    # Show progress bar
-    PROGRESS=$((i * 100 / 24))
-    printf "   [%3d%%] Pod status: %s/%s ready (attempt %d/24)\n" "$PROGRESS" "$READY_PODS" "$TOTAL_PODS" "$i"
-    
-    if [ "$READY_PODS" -gt 0 ] && [ "$READY_PODS" -eq "$TOTAL_PODS" ]; then
-        echo ""
-        echo "✅ All pods are ready!"
-        break
-    fi
-    
-    if [ "$i" -eq 24 ]; then
-        echo ""
-        echo "⚠️  Pods not ready after 2 minutes, but continuing..."
-    fi
-    
-    sleep 5
-done
-
-echo ""
-echo "📋 Final Status:"
+echo "📋 Final Status Check:"
 kubectl get deployment -n "$LIVEKIT_NAMESPACE"
 kubectl get pods -n "$LIVEKIT_NAMESPACE"
 kubectl get services -n "$LIVEKIT_NAMESPACE"
 kubectl get ingress -n "$LIVEKIT_NAMESPACE"
 echo ""
 
-# =============================================================================
-# STEP 7: GET ALB DNS
-# =============================================================================
-
-echo "📋 Step 7: Get ALB DNS"
-echo "======================"
-
-echo "⏳ Getting ALB DNS name..."
+# Get ALB DNS
+echo "🌐 Getting ALB DNS name..."
 ALB_DNS=""
-for i in {1..12}; do
+for i in {1..20}; do
     ALB_DNS=$(kubectl get ingress -n "$LIVEKIT_NAMESPACE" -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
     
     if [[ -n "$ALB_DNS" && "$ALB_DNS" != "null" ]]; then
@@ -443,45 +334,41 @@ for i in {1..12}; do
         break
     fi
     
-    echo "   Waiting for ALB DNS... (attempt $i/12)"
-    sleep 7
+    echo "   Waiting for ALB DNS... (attempt $i/20)"
+    sleep 10
 done
 
 if [[ -z "$ALB_DNS" || "$ALB_DNS" == "null" ]]; then
-    echo "⚠️  ALB DNS not available yet (this is normal)"
+    echo "⚠️ ALB DNS not available yet (this may take a few minutes)"
     ALB_DNS="pending"
 fi
 echo ""
 
 # =============================================================================
-# DEPLOYMENT SUMMARY
+# SUMMARY
 # =============================================================================
 
-echo "🎉 DEPLOYMENT SUMMARY"
-echo "===================="
+echo "🎉 DEPLOYMENT COMPLETE"
+echo "====================="
 echo "✅ LiveKit Server deployed successfully!"
 echo ""
-echo "📋 Configuration:"
-echo "   Environment: $ENVIRONMENT"
-echo "   Namespace: $LIVEKIT_NAMESPACE"
+echo "📋 Connection Details:"
 echo "   Domain: https://$LIVEKIT_DOMAIN"
-echo "   TURN Domain: $TURN_DOMAIN"
+echo "   WebSocket URL: wss://$LIVEKIT_DOMAIN"
 echo "   ALB DNS: $ALB_DNS"
 echo ""
-echo "📋 API Configuration:"
+echo "📋 API Credentials:"
 echo "   API Key: $API_KEY"
-echo "   API Secret: ${API_SECRET:0:10}..."
-echo "   WebSocket URL: wss://$LIVEKIT_DOMAIN"
-echo "   HTTP URL: https://$LIVEKIT_DOMAIN"
+echo "   API Secret: $API_SECRET"
 echo ""
 echo "📋 Next Steps:"
 echo "   1. Wait 5-10 minutes for ALB to be fully provisioned"
-echo "   2. Test connectivity: curl -I https://$LIVEKIT_DOMAIN"
-echo "   3. Create Route 53 records pointing to ALB"
+echo "   2. Update Route 53 DNS to point $LIVEKIT_DOMAIN to $ALB_DNS"
+echo "   3. Test connection: curl -I https://$LIVEKIT_DOMAIN"
+echo "   4. Use the API credentials above in your LiveKit client applications"
 echo ""
 
-# Clean up
+# Cleanup
 rm -f /tmp/livekit-values.yaml
 
-echo "✅ Deployment completed!"
-echo "📅 Completed at: $(date)"
+echo "✅ Deployment completed at: $(date)"
