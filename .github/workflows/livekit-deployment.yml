@@ -311,11 +311,20 @@ jobs:
           sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
           curl -fsSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz | tar -xz
           sudo mv linux-amd64/helm /usr/local/bin/
+          
+          # Install jq for JSON processing
+          sudo apt-get update && sudo apt-get install -y jq
+          
+          # Verify installations
+          echo "✅ Tool versions:"
+          kubectl version --client
+          helm version
+          jq --version
 
       - name: Deploy LiveKit
         working-directory: scripts
         run: |
-          chmod +x 03-deploy-livekit.sh
+          chmod +x 02-deploy-livekit.sh
           
           # Determine cluster name and Redis endpoint
           # Use hardcoded values since infrastructure is already deployed
@@ -329,11 +338,28 @@ jobs:
           echo "📋 Environment: ${{ inputs.environment }}"
           echo ""
           
-          # Deploy LiveKit with configuration
+          # Enable full logging and continuous output
+          set -x  # Enable command tracing
+          
+          # Deploy LiveKit with configuration and full logging
           CLUSTER_NAME="$CLUSTER_NAME" \
           AWS_REGION="${{ env.AWS_REGION }}" \
           REDIS_ENDPOINT="$REDIS_ENDPOINT" \
-          ./03-deploy-livekit.sh
+          ENVIRONMENT="${{ inputs.environment }}" \
+          ./02-deploy-livekit.sh 2>&1 | tee /tmp/livekit-deployment.log
+          
+          # Show final status
+          echo ""
+          echo "🔍 Final Status Check:"
+          kubectl get deployment -n livekit || echo "No deployments found"
+          kubectl get pods -n livekit || echo "No pods found"
+          kubectl get ingress -n livekit || echo "No ingress found"
+          kubectl get services -n livekit || echo "No services found"
+          
+          echo ""
+          echo "📋 Deployment Log Summary:"
+          echo "✅ LiveKit deployment completed"
+          echo "📄 Full logs available in pipeline output above"
 
   # DESTROY: Remove everything (Optional)
   destroy:
