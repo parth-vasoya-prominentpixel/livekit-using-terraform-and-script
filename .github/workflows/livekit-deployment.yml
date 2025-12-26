@@ -57,6 +57,7 @@ on:
         type: string
       hosted_zone_id:
         description: 'Route53 Hosted Zone ID for DNS validation'
+        default: 'Z023244434BR682QISWOZ'
         required: true
         type: string
 

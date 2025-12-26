@@ -22,7 +22,7 @@ ROLE_ARN="${PIPELINE_ROLE_ARN:-}"
 
 # --- ACM Certificate Variables ---
 DOMAIN_NAME="${DOMAIN_NAME:-livekit.example.com}"
-HOSTED_ZONE_ID="${HOSTED_ZONE_ID:-}"
+HOSTED_ZONE_ID="${HOSTED_ZONE_ID:-Z023244434BR682QISWOZ}"
 CERT_REGION="${CERT_REGION:-$AWS_REGION}"  # use us-east-1 for CloudFront
 
 # =============================================================================
