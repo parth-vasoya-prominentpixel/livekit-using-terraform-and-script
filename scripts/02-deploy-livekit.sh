@@ -22,13 +22,58 @@ REDIS_ENDPOINT="${REDIS_ENDPOINT:-}"
 LIVEKIT_NAMESPACE="livekit"
 LIVEKIT_DOMAIN="livekit-eks-tf.digi-telephony.com"
 TURN_DOMAIN="turn-eks-tf.digi-telephony.com"
-CERTIFICATE_ARN="arn:aws:acm:us-east-1:918595516608:certificate/4523a895-7899-41a3-8589-2a5baed3b420"
+CERTIFICATE_ARN="arn:aws:acm:us-east-1:918595516608:certificate/388e3ff7-9763-4772-bfef-56cf64fcc414"
 HELM_RELEASE_NAME="livekit-server"
 HELM_CHART_VERSION="1.5.2"
 
-# LiveKit API Keys (Generate secure keys)
-API_KEY="a630d5cf73030309d7de89d9c34f18b6"
-API_SECRET="8ae7889d73e878636e434640027f2b33e3ba03836e9af0ee9f2ce33297a7f872"
+# LiveKit API Keys - Generate secure keys dynamically
+echo "🔐 Generating secure LiveKit API keys..."
+
+# Generate API Key (starts with LK, 16 characters total)
+API_KEY="LK$(openssl rand -hex 7 | tr '[:lower:]' '[:upper:]')"
+
+# Generate API Secret (64 characters, base64 encoded for security)
+API_SECRET=$(openssl rand -base64 48 | tr -d '\n' | head -c 64)
+
+echo "✅ Generated API Key: $API_KEY"
+echo "✅ Generated API Secret: ${API_SECRET:0:10}... (64 chars total)"
+echo ""
+
+# Save keys to a secure file for reference (optional)
+if [[ -n "${GITHUB_WORKSPACE:-}" ]]; then
+    # In GitHub Actions, save to workspace for potential reuse
+    echo "📋 Saving keys to workspace for reference..."
+    mkdir -p "$GITHUB_WORKSPACE/.livekit"
+    cat > "$GITHUB_WORKSPACE/.livekit/api-keys.txt" << EOF
+# LiveKit API Keys - Generated on $(date)
+# Environment: $ENVIRONMENT
+# Cluster: $CLUSTER_NAME
+
+API_KEY=$API_KEY
+API_SECRET=$API_SECRET
+
+# Usage:
+# WebSocket URL: wss://$LIVEKIT_DOMAIN
+# HTTP URL: https://$LIVEKIT_DOMAIN
+EOF
+    echo "✅ Keys saved to .livekit/api-keys.txt"
+else
+    # Local execution, save to /tmp
+    echo "📋 Saving keys to /tmp for reference..."
+    cat > /tmp/livekit-api-keys.txt << EOF
+# LiveKit API Keys - Generated on $(date)
+# Environment: $ENVIRONMENT
+# Cluster: $CLUSTER_NAME
+
+API_KEY=$API_KEY
+API_SECRET=$API_SECRET
+
+# Usage:
+# WebSocket URL: wss://$LIVEKIT_DOMAIN
+# HTTP URL: https://$LIVEKIT_DOMAIN
+EOF
+    echo "✅ Keys saved to /tmp/livekit-api-keys.txt"
+fi
 
 # Validate required environment variables
 if [[ -z "$CLUSTER_NAME" ]]; then
@@ -223,6 +268,27 @@ echo "=============================================="
 
 echo "🔄 Creating LiveKit values.yaml configuration..."
 
+# Validate API keys are set and properly formatted
+if [[ -z "$API_KEY" || -z "$API_SECRET" ]]; then
+    echo "❌ API_KEY or API_SECRET generation failed"
+    exit 1
+fi
+
+# Validate key formats
+if [[ ! "$API_KEY" =~ ^LK[A-F0-9]{14}$ ]]; then
+    echo "❌ API_KEY format is invalid: $API_KEY"
+    exit 1
+fi
+
+if [[ ${#API_SECRET} -ne 64 ]]; then
+    echo "❌ API_SECRET length is invalid: ${#API_SECRET} (expected 64)"
+    exit 1
+fi
+
+echo "✅ API Key: $API_KEY (format validated)"
+echo "✅ API Secret: ${API_SECRET:0:10}... (length: ${#API_SECRET} chars - validated)"
+echo ""
+
 # Create values.yaml for LiveKit deployment - exact structure as provided
 cat > /tmp/livekit-values.yaml << EOF
 livekit:
@@ -236,7 +302,7 @@ redis:
   address: $REDIS_ENDPOINT
 
 keys:
-  $API_KEY: $API_SECRET
+  "$API_KEY": "$API_SECRET"
 
 metrics:
   enabled: true
@@ -309,10 +375,33 @@ ingress:
 EOF
 
 echo "✅ LiveKit values.yaml created"
+
+# Validate the generated YAML
+echo "🔍 Validating generated values.yaml..."
+if helm template test-release livekit/livekit-server --values /tmp/livekit-values.yaml --dry-run >/dev/null 2>&1; then
+    echo "✅ Values.yaml is valid"
+else
+    echo "❌ Values.yaml validation failed"
+    echo "📋 Generated values.yaml content:"
+    cat /tmp/livekit-values.yaml
+    exit 1
+fi
 echo ""
 
 echo "📋 Configuration Summary:"
 echo "========================"
+echo "🔍 Key Configuration Check:"
+echo "   API Key: $API_KEY"
+echo "   API Secret Length: ${#API_SECRET} characters"
+echo "   Redis Endpoint: $REDIS_ENDPOINT"
+echo "   LiveKit Domain: $LIVEKIT_DOMAIN"
+echo "   TURN Domain: $TURN_DOMAIN"
+echo ""
+echo "📋 Generated Values Preview:"
+echo "----------------------------"
+head -20 /tmp/livekit-values.yaml
+echo "..."
+echo "----------------------------"
 cat /tmp/livekit-values.yaml
 echo ""
 
@@ -612,7 +701,6 @@ echo "📋 Ingress Status:"
 kubectl get ingress -n "$LIVEKIT_NAMESPACE" -o wide
 echo ""
 
-# Check if LiveKit is responding
 echo "🔍 Testing LiveKit Connectivity:"
 FINAL_READY=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --no-headers 2>/dev/null | grep -c "1/1.*Running" || echo "0")
 FINAL_TOTAL=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server --no-headers 2>/dev/null | wc -l || echo "0")
@@ -620,16 +708,42 @@ FINAL_TOTAL=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name
 if [ "$FINAL_READY" -gt 0 ] && [ "$FINAL_READY" -eq "$FINAL_TOTAL" ]; then
     echo "✅ LiveKit pods are running ($FINAL_READY/$FINAL_TOTAL)"
     
-    # Test internal connectivity
-    echo "🔄 Testing internal LiveKit connectivity..."
-    if kubectl exec -n "$LIVEKIT_NAMESPACE" deployment/livekit-server -- curl -s -f http://localhost:7880/ >/dev/null 2>&1; then
-        echo "✅ LiveKit server is responding internally"
+    # Check LiveKit logs for key configuration
+    echo "🔍 Checking LiveKit configuration..."
+    POD_NAME=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server -o jsonpath='{.items[0].metadata.name}')
+    
+    if [[ -n "$POD_NAME" ]]; then
+        echo "📋 LiveKit Pod: $POD_NAME"
+        
+        # Check for key configuration errors in logs
+        echo "🔍 Checking for key configuration in logs..."
+        if kubectl logs "$POD_NAME" -n "$LIVEKIT_NAMESPACE" --tail=50 | grep -i "key" | head -5; then
+            echo "✅ Key configuration logs found"
+        else
+            echo "ℹ️  No key-related logs found (may be normal)"
+        fi
+        
+        # Test internal connectivity
+        echo "🔄 Testing internal LiveKit connectivity..."
+        if kubectl exec -n "$LIVEKIT_NAMESPACE" "$POD_NAME" -- curl -s -f http://localhost:7880/ >/dev/null 2>&1; then
+            echo "✅ LiveKit server is responding internally"
+        else
+            echo "⚠️  LiveKit server internal check failed (may be normal during startup)"
+            echo "   This is expected for new deployments and will resolve once fully started"
+        fi
     else
-        echo "⚠️  LiveKit server internal check failed (may be normal during startup)"
-        echo "   This is expected for new deployments and will resolve once fully started"
+        echo "⚠️  Could not find LiveKit pod for detailed checks"
     fi
 else
     echo "❌ LiveKit pods are not ready ($FINAL_READY/$FINAL_TOTAL)"
+    
+    # Show pod status for debugging
+    echo "🔍 Pod Status for Debugging:"
+    kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app.kubernetes.io/name=livekit-server -o wide
+    
+    # Show recent events
+    echo "🔍 Recent Events:"
+    kubectl get events -n "$LIVEKIT_NAMESPACE" --sort-by='.lastTimestamp' | tail -10
 fi
 
 echo ""
@@ -676,6 +790,9 @@ if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     echo "alb_dns=${ALB_DNS:-pending}" >> "$GITHUB_OUTPUT"
     echo "namespace=$LIVEKIT_NAMESPACE" >> "$GITHUB_OUTPUT"
     echo "api_key=$API_KEY" >> "$GITHUB_OUTPUT"
+    echo "api_secret=$API_SECRET" >> "$GITHUB_OUTPUT"
+    echo "websocket_url=wss://$LIVEKIT_DOMAIN" >> "$GITHUB_OUTPUT"
+    echo "http_url=https://$LIVEKIT_DOMAIN" >> "$GITHUB_OUTPUT"
 fi
 
 # Clean up temporary files
