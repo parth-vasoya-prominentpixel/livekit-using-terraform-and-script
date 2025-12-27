@@ -282,11 +282,16 @@ jobs:
         run: |
           chmod +x 01-setup-eks-access-and-acm.sh
           
-          # Determine cluster name
+          # Determine cluster name - consistent logic across all steps
           if [ "${{ inputs.skip_terraform_apply }}" = "true" ]; then
             CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
           else
+            # Try to get from terraform output, fallback to constructed name
             CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
+            if [ -z "$CLUSTER_NAME" ]; then
+              CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
+              echo "⚠️  Using constructed cluster name: $CLUSTER_NAME"
+            fi
           fi
           
           echo "📋 Configuration for EKS Access Policy & ACM Certificate:"
@@ -297,6 +302,12 @@ jobs:
           echo "📋 Domain: ${{ inputs.domain_name }}"
           echo "📋 Hosted Zone ID: ${{ inputs.hosted_zone_id }}"
           echo ""
+          
+          # Validate required variables
+          if [ -z "$CLUSTER_NAME" ]; then
+            echo "❌ CLUSTER_NAME could not be determined"
+            exit 1
+          fi
           
           # Enable full logging
           set -x
@@ -328,7 +339,7 @@ jobs:
   setup-load-balancer-controller:
     name: 🔧 Step 5 - Setup AWS Load Balancer Controller
     runs-on: ubuntu-latest
-    needs: [eks-access-and-acm]
+    needs: [eks-access-and-acm, terraform-apply]
     if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_load_balancer && (needs.eks-access-and-acm.result == 'success' || inputs.skip_eks_access) }}
     environment: livekit-poc-${{ inputs.environment }}-setup-load-balancer
     
@@ -387,11 +398,16 @@ jobs:
         run: |
           chmod +x 02-setup-load-balancer-controller.sh
           
-          # Determine cluster name
+          # Determine cluster name - consistent logic across all steps
           if [ "${{ inputs.skip_terraform_apply }}" = "true" ]; then
             CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
           else
+            # Try to get from terraform output, fallback to constructed name
             CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
+            if [ -z "$CLUSTER_NAME" ]; then
+              CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
+              echo "⚠️  Using constructed cluster name: $CLUSTER_NAME"
+            fi
           fi
           
           echo "📋 Configuration for Load Balancer Controller Setup:"
@@ -427,7 +443,7 @@ jobs:
   deploy-livekit:
     name: 🎥 Step 6 - Deploy LiveKit
     runs-on: ubuntu-latest
-    needs: [setup-load-balancer-controller, eks-access-and-acm]
+    needs: [setup-load-balancer-controller, eks-access-and-acm, terraform-apply]
     if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_livekit && (needs.setup-load-balancer-controller.result == 'success' || inputs.skip_load_balancer) }}
     environment: livekit-poc-${{ inputs.environment }}-deploy-livekit
     
@@ -479,10 +495,29 @@ jobs:
         run: |
           chmod +x 03-deploy-livekit.sh
           
-          # Determine cluster name and Redis endpoint
-          # Use hardcoded values since infrastructure is already deployed
-          CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
-          REDIS_ENDPOINT="lp-ec-redis-use1-dev-redis.x4ncn3.ng.0001.use1.cache.amazonaws.com:6379"
+          # Determine cluster name - consistent with other steps
+          if [ "${{ inputs.skip_terraform_apply }}" = "true" ]; then
+            CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
+          else
+            # Try to get from terraform output, fallback to constructed name
+            CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
+            if [ -z "$CLUSTER_NAME" ]; then
+              CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
+              echo "⚠️  Using constructed cluster name: $CLUSTER_NAME"
+            fi
+          fi
+          
+          # Determine Redis endpoint - consistent with other steps
+          if [ "${{ inputs.skip_terraform_apply }}" = "true" ]; then
+            REDIS_ENDPOINT="lp-ec-redis-use1-${{ inputs.environment }}-redis.x4ncn3.ng.0001.use1.cache.amazonaws.com:6379"
+          else
+            # Try to get from terraform output, fallback to constructed name
+            REDIS_ENDPOINT="${{ needs.terraform-apply.outputs.redis-endpoint }}"
+            if [ -z "$REDIS_ENDPOINT" ]; then
+              REDIS_ENDPOINT="lp-ec-redis-use1-${{ inputs.environment }}-redis.x4ncn3.ng.0001.use1.cache.amazonaws.com:6379"
+              echo "⚠️  Using constructed Redis endpoint: $REDIS_ENDPOINT"
+            fi
+          fi
           
           echo "📋 Configuration for LiveKit Deployment:"
           echo "📋 Cluster: $CLUSTER_NAME"
@@ -492,6 +527,17 @@ jobs:
           echo "📋 Domain: ${{ inputs.domain_name }}"
           echo "📋 Certificate ARN: ${{ needs.eks-access-and-acm.outputs.certificate-arn || 'Auto-detect' }}"
           echo ""
+          
+          # Validate required variables
+          if [ -z "$CLUSTER_NAME" ]; then
+            echo "❌ CLUSTER_NAME could not be determined"
+            exit 1
+          fi
+          
+          if [ -z "$REDIS_ENDPOINT" ]; then
+            echo "❌ REDIS_ENDPOINT could not be determined"
+            exit 1
+          fi
           
           # Enable full logging and continuous output
           set -x  # Enable command tracing
@@ -523,7 +569,7 @@ jobs:
   setup-dns-records:
     name: 🌐 Step 7 - Setup DNS Records for LiveKit
     runs-on: ubuntu-latest
-    needs: [deploy-livekit, eks-access-and-acm]
+    needs: [deploy-livekit, eks-access-and-acm, terraform-apply]
     if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_dns_setup && ((needs.deploy-livekit.result == 'success') || (inputs.skip_livekit && needs.eks-access-and-acm.result == 'success')) }}
     environment: livekit-poc-${{ inputs.environment }}-setup-dns
     outputs:
@@ -607,6 +653,12 @@ jobs:
           echo "📋 TURN Domain: turn-${{ inputs.domain_name }}"
           echo "📋 Hosted Zone ID: ${{ inputs.hosted_zone_id }}"
           echo ""
+          
+          # Validate required variables
+          if [ -z "$CLUSTER_NAME" ]; then
+            echo "❌ CLUSTER_NAME could not be determined"
+            exit 1
+          fi
           
           # Enable full logging
           set -x
