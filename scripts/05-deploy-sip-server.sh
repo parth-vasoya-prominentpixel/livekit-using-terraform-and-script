@@ -286,8 +286,21 @@ spec:
           - name: config-volume
             mountPath: /config
             readOnly: true
-        # BEFORE: Low resource limits
-        # NOW: Increase for production workload
+        # Health checks
+        livenessProbe:
+          tcpSocket:
+            port: 5060
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 5060
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
         resources:
           requests:
             cpu: 500m      
