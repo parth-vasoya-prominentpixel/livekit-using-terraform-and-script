@@ -186,7 +186,7 @@ data:
     #!KAMAILIO
 
     ####### Global Parameters #########
-    debug=4
+    debug=2
     log_stderror=yes
     log_facility=LOG_LOCAL0
     children=8
