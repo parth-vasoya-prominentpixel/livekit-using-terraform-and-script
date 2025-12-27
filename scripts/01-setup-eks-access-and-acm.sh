@@ -23,8 +23,8 @@ ROLE_ARN="${PIPELINE_ROLE_ARN:-}"
 ENVIRONMENT="${ENVIRONMENT:-dev}"
 
 # --- ACM Certificate Variables ---
-DOMAIN_NAME="${DOMAIN_NAME:-livekit-eks-tf.digi-telephony.com}"
-HOSTED_ZONE_ID="${HOSTED_ZONE_ID:-Z023244434BR682QISWOZ}"
+DOMAIN_NAME="${DOMAIN_NAME:-}"
+HOSTED_ZONE_ID="${HOSTED_ZONE_ID:-}"
 CERT_REGION="${CERT_REGION:-$AWS_REGION}"  # use us-east-1 for CloudFront
 
 # --- Output Variables for Pipeline Integration ---

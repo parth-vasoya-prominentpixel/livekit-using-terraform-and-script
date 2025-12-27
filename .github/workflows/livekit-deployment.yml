@@ -505,6 +505,116 @@ jobs:
           echo "🔗 Access your LiveKit server at: https://${{ inputs.domain_name }}"
           echo "📄 Full logs available in pipeline output above"
 
+  # Step 7: Setup DNS Records for LiveKit
+  setup-dns-records:
+    name: 🌐 Step 7 - Setup DNS Records for LiveKit
+    runs-on: ubuntu-latest
+    needs: [deploy-livekit, eks-access-and-acm]
+    if: ${{ always() && inputs.action == 'deploy' && (needs.deploy-livekit.result == 'success') }}
+    environment: livekit-poc-${{ inputs.environment }}-setup-dns
+    outputs:
+      alb-endpoint: ${{ steps.dns-setup.outputs.alb_endpoint }}
+      primary-domain: ${{ steps.dns-setup.outputs.primary_domain }}
+      turn-domain: ${{ steps.dns-setup.outputs.turn_domain }}
+    
+    steps:
+      - name: 📋 Manual Approval - Setup DNS Records
+        run: |
+          echo "🤔 Manual approval required to setup DNS records for LiveKit"
+          echo ""
+          echo "📋 This step will:"
+          echo "   ✅ Wait 5 minutes for ALB to be fully active and stable"
+          echo "   ✅ Retrieve ALB endpoint from LiveKit ingress"
+          echo "   ✅ Create primary domain record: ${{ inputs.domain_name }}"
+          echo "   ✅ Create TURN domain record: turn-${{ inputs.domain_name }}"
+          echo "   ✅ Handle existing DNS records properly (delete/recreate)"
+          echo "   ✅ Verify DNS resolution and propagation"
+          echo ""
+          echo "🌍 Environment: ${{ inputs.environment }}"
+          echo "🔗 Primary Domain: ${{ inputs.domain_name }}"
+          echo "🔄 TURN Domain: turn-${{ inputs.domain_name }}"
+          echo "🏷️  Hosted Zone: ${{ inputs.hosted_zone_id }}"
+          echo "⏱️ Estimated Time: ~8-10 minutes (includes 5min ALB wait)"
+          echo ""
+          echo "🔒 Security: This step requires permissions to:"
+          echo "   • Read Kubernetes ingress resources"
+          echo "   • Manage Route53 DNS records"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          role-session-name: GitHubActions-DNS-Setup-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Tools
+        run: |
+          # Install kubectl for ingress inspection
+          curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+          
+          # Install additional tools for DNS testing
+          sudo apt-get update && sudo apt-get install -y dnsutils curl
+          
+          # Verify installations
+          echo "✅ Tool versions:"
+          kubectl version --client
+          nslookup -version || echo "nslookup available"
+
+      - name: Setup DNS Records for LiveKit
+        id: dns-setup
+        working-directory: scripts
+        run: |
+          chmod +x 04-setup-dns-records.sh
+          
+          # Determine cluster name
+          if [ "${{ inputs.skip_terraform_apply }}" = "true" ]; then
+            CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
+          else
+            CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
+          fi
+          
+          echo "📋 Configuration for DNS Records Setup:"
+          echo "📋 Cluster: $CLUSTER_NAME"
+          echo "📋 Region: ${{ env.AWS_REGION }}"
+          echo "📋 Environment: ${{ inputs.environment }}"
+          echo "📋 Primary Domain: ${{ inputs.domain_name }}"
+          echo "📋 TURN Domain: turn-${{ inputs.domain_name }}"
+          echo "📋 Hosted Zone ID: ${{ inputs.hosted_zone_id }}"
+          echo ""
+          
+          # Enable full logging
+          set -x
+          
+          # Run DNS setup with full logging
+          CLUSTER_NAME="$CLUSTER_NAME" \
+          AWS_REGION="${{ env.AWS_REGION }}" \
+          ENVIRONMENT="${{ inputs.environment }}" \
+          DOMAIN_NAME="${{ inputs.domain_name }}" \
+          HOSTED_ZONE_ID="${{ inputs.hosted_zone_id }}" \
+          ./04-setup-dns-records.sh 2>&1 | tee /tmp/dns-setup.log
+          
+          # Read outputs from files if they exist
+          if [ -f "/tmp/alb_endpoint.txt" ]; then
+            ALB_ENDPOINT=$(cat /tmp/alb_endpoint.txt)
+            echo "alb_endpoint=$ALB_ENDPOINT" >> $GITHUB_OUTPUT
+            echo "primary_domain=${{ inputs.domain_name }}" >> $GITHUB_OUTPUT
+            echo "turn_domain=turn-${{ inputs.domain_name }}" >> $GITHUB_OUTPUT
+            echo "✅ DNS information exported: $ALB_ENDPOINT"
+          else
+            echo "⚠️  ALB endpoint output file not found"
+          fi
+          
+          echo ""
+          echo "📋 DNS Setup Log Summary:"
+          echo "✅ DNS records setup completed"
+          echo "🌐 Primary Domain: https://${{ inputs.domain_name }}"
+          echo "🔄 TURN Domain: turn-${{ inputs.domain_name }}"
+          echo "📄 Full logs available in pipeline output above"
+
   # DESTROY: Remove everything (Optional)
   destroy:
     name: 🗑️ Destroy LiveKit Infrastructure
@@ -513,6 +623,23 @@ jobs:
     environment: livekit-poc-${{ inputs.environment }}-destroy
     
     steps:
+      - name: 📋 Manual Approval - Destroy Infrastructure
+        run: |
+          echo "🤔 Manual approval required to destroy LiveKit infrastructure"
+          echo ""
+          echo "⚠️  WARNING: This will permanently delete:"
+          echo "   🗑️  All Kubernetes resources (LiveKit, Load Balancer Controller)"
+          echo "   🗑️  EKS cluster and associated resources"
+          echo "   🗑️  ElastiCache Redis cluster"
+          echo "   🗑️  VPC, subnets, and networking components"
+          echo "   🗑️  DNS records for ${{ inputs.domain_name }} and turn-${{ inputs.domain_name }}"
+          echo "   🗑️  All Terraform-managed infrastructure"
+          echo ""
+          echo "🌍 Environment: ${{ inputs.environment }}"
+          echo "⏱️ Estimated Time: ~10-15 minutes"
+          echo ""
+          echo "🔒 This action cannot be undone!"
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -534,6 +661,64 @@ jobs:
           
           curl -fsSL https://get.helm.sh/helm-v3.16.3-linux-amd64.tar.gz | tar -xz
           sudo mv linux-amd64/helm /usr/local/bin/
+
+      - name: 🗑️ Clean up DNS Records
+        run: |
+          echo "🗑️ Cleaning up DNS records before infrastructure destruction..."
+          
+          # Function to delete DNS record if it exists
+          delete_dns_record_if_exists() {
+            local record_name="$1"
+            local record_type="$2"
+            
+            echo "🔍 Checking for $record_type record: $record_name"
+            
+            # Get existing record value
+            local existing_value=$(aws route53 list-resource-record-sets \
+              --hosted-zone-id "${{ inputs.hosted_zone_id }}" \
+              --query "ResourceRecordSets[?Name=='${record_name}.' && Type=='${record_type}'].ResourceRecords[0].Value" \
+              --output text 2>/dev/null || echo "")
+            
+            if [[ -n "$existing_value" && "$existing_value" != "None" ]]; then
+              echo "🗑️  Deleting $record_type record: $record_name -> $existing_value"
+              
+              cat <<EOF > delete-record.json
+          {
+              "Comment": "Cleanup $record_type record for $record_name during destroy",
+              "Changes": [
+                  {
+                      "Action": "DELETE",
+                      "ResourceRecordSet": {
+                          "Name": "$record_name",
+                          "Type": "$record_type",
+                          "TTL": 300,
+                          "ResourceRecords": [
+                              { "Value": "$existing_value" }
+                          ]
+                      }
+                  }
+              ]
+          }
+          EOF
+              
+              aws route53 change-resource-record-sets \
+                --hosted-zone-id "${{ inputs.hosted_zone_id }}" \
+                --change-batch file://delete-record.json || echo "Failed to delete $record_name"
+              
+              rm -f delete-record.json
+              echo "✅ $record_type record deleted: $record_name"
+            else
+              echo "ℹ️  No $record_type record found for: $record_name"
+            fi
+          }
+          
+          # Delete primary domain record
+          delete_dns_record_if_exists "${{ inputs.domain_name }}" "CNAME"
+          
+          # Delete TURN domain record
+          delete_dns_record_if_exists "turn-${{ inputs.domain_name }}" "CNAME"
+          
+          echo "✅ DNS cleanup completed"
 
       - name: 🗑️ Destroy All Infrastructure
         working-directory: resources

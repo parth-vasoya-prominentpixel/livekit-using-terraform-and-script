@@ -18,12 +18,16 @@ echo ""
 CLUSTER_NAME="${CLUSTER_NAME:-}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 REDIS_ENDPOINT="${REDIS_ENDPOINT:-}"
+ENVIRONMENT="${ENVIRONMENT:-dev}"
 
-# LiveKit configuration - using your specified values
+# Dynamic configuration from pipeline
+DOMAIN_NAME="${DOMAIN_NAME:-}"
+CERTIFICATE_ARN="${CERTIFICATE_ARN:-}"
+
+# LiveKit configuration
 LIVEKIT_NAMESPACE="livekit"
-LIVEKIT_DOMAIN="livekit-eks-tf.digi-telephony.com"
-TURN_DOMAIN="turn-eks-tf.digi-telephony.com"
-CERTIFICATE_ARN="arn:aws:acm:us-east-1:918595516608:certificate/4523a895-7899-41a3-8589-2a5baed3b420"
+LIVEKIT_DOMAIN="$DOMAIN_NAME"
+TURN_DOMAIN="turn-${DOMAIN_NAME}"
 HELM_RELEASE_NAME="livekit-server"
 HELM_CHART_VERSION="1.5.2"
 
@@ -34,10 +38,12 @@ API_SECRET="Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB"
 echo "📋 Configuration:"
 echo "   Cluster: $CLUSTER_NAME"
 echo "   Region: $AWS_REGION"
+echo "   Environment: $ENVIRONMENT"
 echo "   Namespace: $LIVEKIT_NAMESPACE"
 echo "   Domain: $LIVEKIT_DOMAIN"
 echo "   TURN Domain: $TURN_DOMAIN"
 echo "   Redis: $REDIS_ENDPOINT"
+echo "   Certificate ARN: $CERTIFICATE_ARN"
 echo "   API Key: $API_KEY"
 echo ""
 
@@ -50,6 +56,16 @@ fi
 if [[ -z "$REDIS_ENDPOINT" ]]; then
     echo "❌ REDIS_ENDPOINT environment variable is required"
     exit 1
+fi
+
+if [[ -z "$DOMAIN_NAME" ]]; then
+    echo "❌ DOMAIN_NAME environment variable is required"
+    exit 1
+fi
+
+if [[ -z "$CERTIFICATE_ARN" ]]; then
+    echo "⚠️  CERTIFICATE_ARN not provided - will attempt to auto-detect"
+    echo "   This may cause issues if certificate is not found"
 fi
 
 # =============================================================================
