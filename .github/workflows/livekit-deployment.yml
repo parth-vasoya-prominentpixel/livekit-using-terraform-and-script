@@ -53,7 +53,7 @@ on:
       domain_name:
         description: 'Domain name for SSL certificate (e.g., livekit.example.com)'
         required: true
-        default: 'livekit.example.com'
+        default: 'livekit-eks-tf.digi-telephony.com'
         type: string
       hosted_zone_id:
         description: 'Route53 Hosted Zone ID for DNS validation'
@@ -214,20 +214,33 @@ jobs:
     needs: [terraform-apply]
     if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_eks_access && (needs.terraform-apply.result == 'success' || inputs.skip_terraform_apply) }}
     environment: livekit-poc-${{ inputs.environment }}-eks-access-acm
+    outputs:
+      certificate-arn: ${{ steps.eks-acm-setup.outputs.certificate_arn }}
     
     steps:
       - name: 📋 Manual Approval - Configure EKS Access & ACM Certificate
         run: |
           echo "🤔 Manual approval required to configure EKS access policies and ACM certificate"
-          echo "📋 This will:"
-          echo "   - Grant AmazonEKSAdminPolicy to pipeline role"
-          echo "   - Grant AmazonEKSClusterAdminPolicy to pipeline role"
-          echo "   - Update kubeconfig for cluster access"
-          echo "   - Request ACM SSL certificate for domain"
-          echo "   - Create DNS validation records in Route53"
-          echo "   - Wait for certificate issuance"
+          echo ""
+          echo "📋 This step will:"
+          echo "   ✅ Check for existing SSL certificate for domain: ${{ inputs.domain_name }}"
+          echo "   ✅ Use existing certificate if valid, or create new one if needed"
+          echo "   ✅ Grant AmazonEKSAdminPolicy to pipeline role"
+          echo "   ✅ Grant AmazonEKSClusterAdminPolicy to pipeline role"
+          echo "   ✅ Update kubeconfig for cluster access"
+          echo "   ✅ Create/update DNS validation records in Route53"
+          echo "   ✅ Wait for certificate issuance and validation"
+          echo "   ✅ Export certificate ARN for use in subsequent steps"
+          echo ""
           echo "🌍 Environment: ${{ inputs.environment }}"
-          echo "⏱️ Time: ~5-8 minutes"
+          echo "🔗 Domain: ${{ inputs.domain_name }}"
+          echo "🏷️  Hosted Zone: ${{ inputs.hosted_zone_id }}"
+          echo "⏱️ Estimated Time: ~5-8 minutes"
+          echo ""
+          echo "🔒 Security: This step requires elevated permissions to:"
+          echo "   • Manage EKS cluster access policies"
+          echo "   • Request/manage ACM certificates"
+          echo "   • Create DNS records in Route53"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -250,6 +263,7 @@ jobs:
           kubectl version --client
 
       - name: Configure EKS Access Policies & ACM Certificate
+        id: eks-acm-setup
         working-directory: scripts
         run: |
           chmod +x 01-setup-eks-access-and-acm.sh
@@ -264,6 +278,7 @@ jobs:
           echo "📋 Configuration for EKS Access Policy & ACM Certificate:"
           echo "📋 Cluster: $CLUSTER_NAME"
           echo "📋 Region: ${{ env.AWS_REGION }}"
+          echo "📋 Environment: ${{ inputs.environment }}"
           echo "📋 Pipeline Role: ${{ secrets.AWS_OIDC_ROLE_ARN }}"
           echo "📋 Domain: ${{ inputs.domain_name }}"
           echo "📋 Hosted Zone ID: ${{ inputs.hosted_zone_id }}"
@@ -274,11 +289,21 @@ jobs:
           
           CLUSTER_NAME="$CLUSTER_NAME" \
           AWS_REGION="${{ env.AWS_REGION }}" \
+          ENVIRONMENT="${{ inputs.environment }}" \
           PIPELINE_ROLE_ARN="${{ secrets.AWS_OIDC_ROLE_ARN }}" \
           DOMAIN_NAME="${{ inputs.domain_name }}" \
           HOSTED_ZONE_ID="${{ inputs.hosted_zone_id }}" \
           CERT_REGION="${{ env.AWS_REGION }}" \
           ./01-setup-eks-access-and-acm.sh 2>&1 | tee /tmp/eks-access-acm.log
+          
+          # Read certificate ARN from output file if it exists
+          if [ -f "/tmp/certificate_arn.txt" ]; then
+            CERT_ARN=$(cat /tmp/certificate_arn.txt)
+            echo "certificate_arn=$CERT_ARN" >> $GITHUB_OUTPUT
+            echo "✅ Certificate ARN exported: $CERT_ARN"
+          else
+            echo "⚠️  Certificate ARN output file not found"
+          fi
           
           echo ""
           echo "📋 EKS Access & ACM Certificate Log Summary:"
@@ -294,6 +319,20 @@ jobs:
     environment: livekit-poc-${{ inputs.environment }}-setup-load-balancer
     
     steps:
+      - name: 📋 Manual Approval - Setup Load Balancer Controller
+        run: |
+          echo "🤔 Manual approval required to setup AWS Load Balancer Controller"
+          echo ""
+          echo "📋 This step will:"
+          echo "   ✅ Install AWS Load Balancer Controller on EKS cluster"
+          echo "   ✅ Configure IAM service account with proper permissions"
+          echo "   ✅ Setup webhook and admission controller"
+          echo "   ✅ Verify controller is running and ready"
+          echo ""
+          echo "🌍 Environment: ${{ inputs.environment }}"
+          echo "🔗 Certificate ARN: ${{ needs.eks-access-and-acm.outputs.certificate-arn || 'Will be detected automatically' }}"
+          echo "⏱️ Estimated Time: ~3-5 minutes"
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -344,7 +383,8 @@ jobs:
           echo "📋 Configuration for Load Balancer Controller Setup:"
           echo "📋 Cluster: $CLUSTER_NAME"
           echo "📋 Region: ${{ env.AWS_REGION }}"
-          echo "📋 Environment: ${{ inputs.environment }}"
+          echo "� Ennvironment: ${{ inputs.environment }}"
+          echo "📋 Certificate ARN: ${{ needs.eks-access-and-acm.outputs.certificate-arn || 'Auto-detect' }}"
           echo ""
           
           # Enable full logging and continuous output
@@ -354,6 +394,7 @@ jobs:
           CLUSTER_NAME="$CLUSTER_NAME" \
           AWS_REGION="${{ env.AWS_REGION }}" \
           ENVIRONMENT="${{ inputs.environment }}" \
+          CERTIFICATE_ARN="${{ needs.eks-access-and-acm.outputs.certificate-arn }}" \
           ./02-setup-load-balancer-controller.sh 2>&1 | tee /tmp/lbc-setup.log
           
           # Show final status
@@ -372,7 +413,7 @@ jobs:
   deploy-livekit:
     name: 🎥 Step 6 - Deploy LiveKit
     runs-on: ubuntu-latest
-    needs: [setup-load-balancer-controller]
+    needs: [setup-load-balancer-controller, eks-access-and-acm]
     if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_livekit && (needs.setup-load-balancer-controller.result == 'success' || inputs.skip_load_balancer) }}
     environment: livekit-poc-${{ inputs.environment }}-deploy-livekit
     
@@ -380,13 +421,18 @@ jobs:
       - name: 📋 Manual Approval - Deploy LiveKit
         run: |
           echo "🤔 Manual approval required to deploy LiveKit"
-          echo "📋 This will deploy:"
-          echo "   - LiveKit Server using official Helm chart"
-          echo "   - ALB Ingress with SSL certificate"
-          echo "   - TURN server for WebRTC connectivity"
-          echo "   - Metrics and Prometheus monitoring"
+          echo ""
+          echo "📋 This step will deploy:"
+          echo "   ✅ LiveKit Server using official Helm chart"
+          echo "   ✅ ALB Ingress with SSL certificate"
+          echo "   ✅ TURN server for WebRTC connectivity"
+          echo "   ✅ Metrics and Prometheus monitoring"
+          echo "   ✅ Redis integration for clustering"
+          echo ""
           echo "🌍 Environment: ${{ inputs.environment }}"
-          echo "⏱️ Time: ~5-10 minutes"
+          echo "🔗 Domain: ${{ inputs.domain_name }}"
+          echo "🔗 Certificate ARN: ${{ needs.eks-access-and-acm.outputs.certificate-arn || 'Auto-detect' }}"
+          echo "⏱️ Estimated Time: ~5-10 minutes"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -429,6 +475,8 @@ jobs:
           echo "📋 Region: ${{ env.AWS_REGION }}"
           echo "📋 Redis: $REDIS_ENDPOINT"
           echo "📋 Environment: ${{ inputs.environment }}"
+          echo "📋 Domain: ${{ inputs.domain_name }}"
+          echo "📋 Certificate ARN: ${{ needs.eks-access-and-acm.outputs.certificate-arn || 'Auto-detect' }}"
           echo ""
           
           # Enable full logging and continuous output
@@ -439,11 +487,13 @@ jobs:
           AWS_REGION="${{ env.AWS_REGION }}" \
           REDIS_ENDPOINT="$REDIS_ENDPOINT" \
           ENVIRONMENT="${{ inputs.environment }}" \
+          DOMAIN_NAME="${{ inputs.domain_name }}" \
+          CERTIFICATE_ARN="${{ needs.eks-access-and-acm.outputs.certificate-arn }}" \
           ./03-deploy-livekit.sh 2>&1 | tee /tmp/livekit-deployment.log
           
           # Show final status
           echo ""
-          echo "🔍 Final Status Check:"
+          echo "�  Final Status Check:"
           kubectl get deployment -n livekit || echo "No deployments found"
           kubectl get pods -n livekit || echo "No pods found"
           kubectl get ingress -n livekit || echo "No ingress found"
@@ -452,6 +502,7 @@ jobs:
           echo ""
           echo "📋 Deployment Log Summary:"
           echo "✅ LiveKit deployment completed"
+          echo "🔗 Access your LiveKit server at: https://${{ inputs.domain_name }}"
           echo "📄 Full logs available in pipeline output above"
 
   # DESTROY: Remove everything (Optional)
