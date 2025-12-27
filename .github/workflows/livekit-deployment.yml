@@ -597,11 +597,13 @@ jobs:
           echo "   ✅ Wait 5 minutes for ALB to be fully active and stable (if needed)"
           echo "   ✅ Retrieve ALB endpoint from LiveKit ingress (with fallback methods)"
           echo "   ✅ Create primary domain A record (ALIAS): ${{ inputs.domain_name }}"
+          echo "   ✅ Create TURN domain A record (ALIAS): turn-${{ inputs.domain_name }}"
           echo "   ✅ Handle existing DNS records properly (delete/recreate)"
           echo "   ✅ Verify DNS resolution and propagation"
           echo ""
           echo "🌍 Environment: ${{ inputs.environment }}"
           echo "🔗 Primary Domain: ${{ inputs.domain_name }}"
+          echo "🔄 TURN Domain: turn-${{ inputs.domain_name }}"
           echo "🏷️  Hosted Zone: ${{ inputs.hosted_zone_id }}"
           echo "🔗 Manual ALB Endpoint: ${{ inputs.manual_alb_endpoint || 'Auto-detect' }}"
           echo "⏱️ Estimated Time: ~8-10 minutes (includes 5min ALB wait if needed)"
@@ -669,6 +671,7 @@ jobs:
           echo "📋 Region: ${{ env.AWS_REGION }}"
           echo "📋 Environment: ${{ inputs.environment }}"
           echo "📋 Primary Domain: ${{ inputs.domain_name }}"
+          echo "📋 TURN Domain: turn-${{ inputs.domain_name }}"
           echo "📋 Hosted Zone ID: ${{ inputs.hosted_zone_id }}"
           echo "📋 Manual ALB Endpoint: ${{ inputs.manual_alb_endpoint || 'Auto-detect' }}"
           echo ""
@@ -696,6 +699,7 @@ jobs:
             ALB_ENDPOINT=$(cat /tmp/alb_endpoint.txt)
             echo "alb_endpoint=$ALB_ENDPOINT" >> $GITHUB_OUTPUT
             echo "primary_domain=${{ inputs.domain_name }}" >> $GITHUB_OUTPUT
+            echo "turn_domain=turn-${{ inputs.domain_name }}" >> $GITHUB_OUTPUT
             echo "✅ DNS information exported: $ALB_ENDPOINT"
           else
             echo "⚠️  ALB endpoint output file not found"
@@ -705,6 +709,7 @@ jobs:
           echo "📋 DNS Setup Log Summary:"
           echo "✅ DNS records setup completed"
           echo "🌐 Primary Domain: https://${{ inputs.domain_name }}"
+          echo "🔄 TURN Domain: turn-${{ inputs.domain_name }}"
           echo "📄 Full logs available in pipeline output above"
 
   # DESTROY: Remove everything (Optional)

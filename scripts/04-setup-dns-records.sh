@@ -23,8 +23,9 @@ DOMAIN_NAME="${DOMAIN_NAME:-}"
 HOSTED_ZONE_ID="${HOSTED_ZONE_ID:-}"
 
 # --- Derived Variables ---
-# No need for TURN domain - just primary domain
+# Both primary and TURN domains
 BASE_DOMAIN=$(echo "$DOMAIN_NAME" | sed 's/^[^.]*\.//')
+TURN_DOMAIN="turn-${DOMAIN_NAME}"
 
 # --- Output Variables ---
 ALB_ENDPOINT_OUTPUT_FILE="${ALB_ENDPOINT_OUTPUT_FILE:-/tmp/alb_endpoint.txt}"
@@ -57,6 +58,7 @@ echo "   Cluster: $CLUSTER_NAME"
 echo "   Region: $AWS_REGION"
 echo "   Environment: $ENVIRONMENT"
 echo "   Primary Domain: $DOMAIN_NAME"
+echo "   TURN Domain: $TURN_DOMAIN"
 echo "   Base Domain: $BASE_DOMAIN"
 echo "   Hosted Zone ID: $HOSTED_ZONE_ID"
 echo ""
@@ -109,17 +111,16 @@ check_existing_record() {
     local record_name="$1"
     local record_type="$2"
     
-    echo "🔍 Checking for existing $record_type record: $record_name"
-    
     if [[ "$record_type" == "A" ]]; then
-        # Check for A record (ALIAS)
+        # Check for A record (ALIAS) - return only the DNS name
         local existing_value=$(aws route53 list-resource-record-sets \
             --hosted-zone-id "$HOSTED_ZONE_ID" \
             --query "ResourceRecordSets[?Name=='${record_name}.' && Type=='${record_type}'].AliasTarget.DNSName" \
             --output text 2>/dev/null || echo "")
         
         if [[ -n "$existing_value" && "$existing_value" != "None" ]]; then
-            echo "📋 Found existing A record: $existing_value"
+            # Clean the DNS name (remove trailing dots and duplicates)
+            existing_value=$(echo "$existing_value" | sed 's/\.$//g' | awk '{print $1}')
             echo "$existing_value"
             return 0
         fi
@@ -131,13 +132,11 @@ check_existing_record() {
             --output text 2>/dev/null || echo "")
         
         if [[ -n "$existing_value" && "$existing_value" != "None" ]]; then
-            echo "📋 Found existing CNAME record: $existing_value"
             echo "$existing_value"
             return 0
         fi
     fi
     
-    echo "ℹ️  No existing $record_type record found for $record_name"
     return 1
 }
 
@@ -275,7 +274,10 @@ manage_dns_a_record() {
     fi
     
     # Check if A record exists
+    echo "🔍 Checking for existing A record: $record_name"
     if existing_value=$(check_existing_record "$record_name" "A"); then
+        echo "� Fouend existing A record: $existing_value"
+        
         # ALWAYS delete existing record (even if it matches) to ensure it works properly
         echo "🔄 Deleting existing A record to ensure proper configuration..."
         echo "   (This ensures the record works correctly and isn't stale)"
@@ -284,6 +286,8 @@ manage_dns_a_record() {
         # Wait for deletion to propagate
         echo "⏳ Waiting for deletion to propagate..."
         sleep 15
+    else
+        echo "ℹ️  No existing A record found for $record_name"
     fi
     
     # Always create the new A record
@@ -367,6 +371,7 @@ export_alb_endpoint() {
     if [[ -n "$GITHUB_OUTPUT" ]]; then
         echo "alb_endpoint=$alb_endpoint" >> "$GITHUB_OUTPUT"
         echo "primary_domain=$DOMAIN_NAME" >> "$GITHUB_OUTPUT"
+        echo "turn_domain=$TURN_DOMAIN" >> "$GITHUB_OUTPUT"
         echo "📄 DNS information exported to GitHub Actions output"
     fi
 }
@@ -475,10 +480,20 @@ manage_dns_a_record "$DOMAIN_NAME" "$ALB_ENDPOINT" "LiveKit primary domain A rec
 echo ""
 
 # -----------------------------------------------------------------------------
-# STEP 6: WAIT FOR DNS PROPAGATION
+# STEP 6: CREATE TURN DOMAIN A RECORD
 # -----------------------------------------------------------------------------
 
-echo "📋 Step 6: Wait for DNS Propagation"
+echo "📋 Step 6: Create TURN Domain A Record (ALIAS)"
+echo "=============================================="
+
+manage_dns_a_record "$TURN_DOMAIN" "$ALB_ENDPOINT" "LiveKit TURN domain A record (ALIAS) - Environment: $ENVIRONMENT"
+echo ""
+
+# -----------------------------------------------------------------------------
+# STEP 7: WAIT FOR DNS PROPAGATION
+# -----------------------------------------------------------------------------
+
+echo "📋 Step 7: Wait for DNS Propagation"
 echo "==================================="
 
 echo "⏳ Waiting for DNS changes to propagate..."
@@ -491,10 +506,10 @@ echo "✅ DNS propagation wait completed"
 echo ""
 
 # -----------------------------------------------------------------------------
-# STEP 7: VERIFY DNS RESOLUTION
+# STEP 8: VERIFY DNS RESOLUTION
 # -----------------------------------------------------------------------------
 
-echo "📋 Step 7: Verify DNS Resolution"
+echo "📋 Step 8: Verify DNS Resolution"
 echo "==============================="
 
 echo "🔍 Testing DNS resolution..."
@@ -506,6 +521,15 @@ if nslookup "$DOMAIN_NAME" >/dev/null 2>&1; then
     echo "✅ Primary domain resolves to: $resolved_ip"
 else
     echo "⚠️  Primary domain DNS resolution pending (may take more time to propagate)"
+fi
+
+# Test TURN domain
+echo "Testing TURN domain: $TURN_DOMAIN"
+if nslookup "$TURN_DOMAIN" >/dev/null 2>&1; then
+    resolved_ip=$(nslookup "$TURN_DOMAIN" | grep -A1 "Name:" | tail -1 | awk '{print $2}' || echo "unknown")
+    echo "✅ TURN domain resolves to: $resolved_ip"
+else
+    echo "⚠️  TURN domain DNS resolution pending (may take more time to propagate)"
 fi
 echo ""
 
