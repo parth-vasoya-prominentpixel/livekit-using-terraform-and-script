@@ -1,5 +1,14 @@
 name: 🎥 LiveKit Deployment Pipeline
 
+# Available Skip Options:
+# - skip_prerequisites: Skip tools installation and validation
+# - skip_terraform_plan: Skip Terraform planning phase  
+# - skip_terraform_apply: Skip infrastructure deployment
+# - skip_eks_access: Skip EKS access policies & ACM certificate setup
+# - skip_load_balancer: Skip AWS Load Balancer Controller installation
+# - skip_livekit: Skip LiveKit application deployment
+# - skip_dns_setup: Skip DNS records creation for domains
+
 on:
   workflow_dispatch:
     inputs:
@@ -47,6 +56,11 @@ on:
         type: boolean
       skip_livekit:
         description: 'Skip LiveKit Deployment'
+        required: false
+        default: false
+        type: boolean
+      skip_dns_setup:
+        description: 'Skip DNS Records Setup'
         required: false
         default: false
         type: boolean
@@ -510,7 +524,7 @@ jobs:
     name: 🌐 Step 7 - Setup DNS Records for LiveKit
     runs-on: ubuntu-latest
     needs: [deploy-livekit, eks-access-and-acm]
-    if: ${{ always() && inputs.action == 'deploy' && (needs.deploy-livekit.result == 'success') }}
+    if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_dns_setup && ((needs.deploy-livekit.result == 'success') || (inputs.skip_livekit && needs.eks-access-and-acm.result == 'success')) }}
     environment: livekit-poc-${{ inputs.environment }}-setup-dns
     outputs:
       alb-endpoint: ${{ steps.dns-setup.outputs.alb_endpoint }}
@@ -539,6 +553,9 @@ jobs:
           echo "🔒 Security: This step requires permissions to:"
           echo "   • Read Kubernetes ingress resources"
           echo "   • Manage Route53 DNS records"
+          echo ""
+          echo "ℹ️  Note: You can skip this step using 'Skip DNS Records Setup' option"
+          echo "ℹ️  This step can run independently if LiveKit is already deployed"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -570,11 +587,16 @@ jobs:
         run: |
           chmod +x 04-setup-dns-records.sh
           
-          # Determine cluster name
+          # Determine cluster name - handle case where terraform steps were skipped
           if [ "${{ inputs.skip_terraform_apply }}" = "true" ]; then
             CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
           else
+            # Try to get from terraform output, fallback to constructed name
             CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
+            if [ -z "$CLUSTER_NAME" ]; then
+              CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
+              echo "⚠️  Using constructed cluster name: $CLUSTER_NAME"
+            fi
           fi
           
           echo "📋 Configuration for DNS Records Setup:"
