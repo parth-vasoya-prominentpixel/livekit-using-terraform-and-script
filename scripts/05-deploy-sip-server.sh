@@ -77,12 +77,27 @@ echo "   Log Level: $LOG_LEVEL"
 echo ""
 
 # Check if required tools are available
-for tool in kubectl; do
+for tool in kubectl aws; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         echo "❌ $tool is required but not installed"
         exit 1
     fi
+    echo "✅ $tool: available"
 done
+
+# Update kubeconfig
+echo "🔧 Updating kubeconfig..."
+aws eks update-kubeconfig --region "$AWS_REGION" --name "$CLUSTER_NAME"
+
+# Verify cluster connectivity
+if ! kubectl get nodes >/dev/null 2>&1; then
+    echo "❌ Cannot connect to Kubernetes cluster"
+    exit 1
+fi
+
+NODE_COUNT=$(kubectl get nodes --no-headers | wc -l)
+echo "✅ Connected to cluster with $NODE_COUNT nodes"
+echo ""
 
 # =============================================================================
 # HELPER FUNCTIONS

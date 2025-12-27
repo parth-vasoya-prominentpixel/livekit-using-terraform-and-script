@@ -722,8 +722,8 @@ jobs:
   deploy-sip-server:
     name: 📞 Step 8 - Deploy SIP Server
     runs-on: ubuntu-latest
-    needs: [prerequisites]
-    if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_sip_server && (needs.prerequisites.result == 'success' || inputs.skip_prerequisites) }}
+    needs: [deploy-livekit, eks-access-and-acm]
+    if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_sip_server && ((needs.deploy-livekit.result == 'success' || inputs.skip_livekit) && (needs.eks-access-and-acm.result == 'success' || inputs.skip_eks_access)) }}
     environment: livekit-poc-${{ inputs.environment }}-deploy-sip-server
     
     steps:
@@ -755,7 +755,8 @@ jobs:
           echo "   • Create Kubernetes resources (ConfigMap, Deployment, Service)"
           echo "   • Access LiveKit namespace"
           echo ""
-          echo "ℹ️  Note: This step can run independently if LiveKit is already deployed"
+          echo "ℹ️  Note: This step requires EKS access and LiveKit namespace to exist"
+          echo "ℹ️  Dependencies: EKS Access & ACM step, LiveKit deployment (or namespace)"
           echo "ℹ️  You can skip this step using 'Skip SIP Server Deployment' option"
 
       - name: Checkout code
