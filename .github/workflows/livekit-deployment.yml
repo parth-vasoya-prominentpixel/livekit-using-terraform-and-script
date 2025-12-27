@@ -594,25 +594,25 @@ jobs:
           echo "🤔 Manual approval required to setup DNS records for LiveKit"
           echo ""
           echo "📋 This step will:"
-          echo "   ✅ Wait 5 minutes for ALB to be fully active and stable"
+          echo "   ✅ Wait 5 minutes for ALB to be fully active and stable (if needed)"
           echo "   ✅ Retrieve ALB endpoint from LiveKit ingress (with fallback methods)"
-          echo "   ✅ Create primary domain record: ${{ inputs.domain_name }}"
-          echo "   ✅ Create TURN domain record: turn-${{ inputs.domain_name }}"
+          echo "   ✅ Create primary domain A record (ALIAS): ${{ inputs.domain_name }}"
           echo "   ✅ Handle existing DNS records properly (delete/recreate)"
           echo "   ✅ Verify DNS resolution and propagation"
           echo ""
           echo "🌍 Environment: ${{ inputs.environment }}"
           echo "🔗 Primary Domain: ${{ inputs.domain_name }}"
-          echo "🔄 TURN Domain: turn-${{ inputs.domain_name }}"
           echo "🏷️  Hosted Zone: ${{ inputs.hosted_zone_id }}"
           echo "🔗 Manual ALB Endpoint: ${{ inputs.manual_alb_endpoint || 'Auto-detect' }}"
-          echo "⏱️ Estimated Time: ~8-10 minutes (includes 5min ALB wait)"
+          echo "⏱️ Estimated Time: ~8-10 minutes (includes 5min ALB wait if needed)"
           echo ""
           echo "🔍 ALB Detection Methods:"
           echo "   • Method 1: Get from LiveKit ingress status"
-          echo "   • Method 2: Search ALB by name pattern"
-          echo "   • Method 3: Find recent ALB in region"
+          echo "   • Method 2: Search for latest LiveKit ALB by creation time"
+          echo "   • Method 3: Find any LiveKit ALB by name"
           echo "   • Method 4: Use manual ALB endpoint if provided"
+          echo ""
+          echo "📋 DNS Record Type: A record (ALIAS) - points directly to ALB"
           echo ""
           echo "🔒 Security: This step requires permissions to:"
           echo "   • Read Kubernetes ingress resources"
@@ -669,7 +669,6 @@ jobs:
           echo "📋 Region: ${{ env.AWS_REGION }}"
           echo "📋 Environment: ${{ inputs.environment }}"
           echo "📋 Primary Domain: ${{ inputs.domain_name }}"
-          echo "📋 TURN Domain: turn-${{ inputs.domain_name }}"
           echo "📋 Hosted Zone ID: ${{ inputs.hosted_zone_id }}"
           echo "📋 Manual ALB Endpoint: ${{ inputs.manual_alb_endpoint || 'Auto-detect' }}"
           echo ""
@@ -697,7 +696,6 @@ jobs:
             ALB_ENDPOINT=$(cat /tmp/alb_endpoint.txt)
             echo "alb_endpoint=$ALB_ENDPOINT" >> $GITHUB_OUTPUT
             echo "primary_domain=${{ inputs.domain_name }}" >> $GITHUB_OUTPUT
-            echo "turn_domain=turn-${{ inputs.domain_name }}" >> $GITHUB_OUTPUT
             echo "✅ DNS information exported: $ALB_ENDPOINT"
           else
             echo "⚠️  ALB endpoint output file not found"
@@ -707,7 +705,6 @@ jobs:
           echo "📋 DNS Setup Log Summary:"
           echo "✅ DNS records setup completed"
           echo "🌐 Primary Domain: https://${{ inputs.domain_name }}"
-          echo "🔄 TURN Domain: turn-${{ inputs.domain_name }}"
           echo "📄 Full logs available in pipeline output above"
 
   # DESTROY: Remove everything (Optional)
@@ -768,16 +765,23 @@ jobs:
             
             echo "🔍 Checking for $record_type record: $record_name"
             
-            # Get existing record value
-            local existing_value=$(aws route53 list-resource-record-sets \
-              --hosted-zone-id "${{ inputs.hosted_zone_id }}" \
-              --query "ResourceRecordSets[?Name=='${record_name}.' && Type=='${record_type}'].ResourceRecords[0].Value" \
-              --output text 2>/dev/null || echo "")
-            
-            if [[ -n "$existing_value" && "$existing_value" != "None" ]]; then
-              echo "🗑️  Deleting $record_type record: $record_name -> $existing_value"
+            if [[ "$record_type" == "A" ]]; then
+              # Get existing A record (ALIAS)
+              local existing_value=$(aws route53 list-resource-record-sets \
+                --hosted-zone-id "${{ inputs.hosted_zone_id }}" \
+                --query "ResourceRecordSets[?Name=='${record_name}.' && Type=='${record_type}'].AliasTarget.DNSName" \
+                --output text 2>/dev/null || echo "")
               
-              cat <<EOF > delete-record.json
+              if [[ -n "$existing_value" && "$existing_value" != "None" ]]; then
+                echo "🗑️  Deleting $record_type record: $record_name -> $existing_value"
+                
+                # Get ALB zone ID for deletion
+                local alb_zone_id=$(aws elbv2 describe-load-balancers \
+                  --query "LoadBalancers[?DNSName=='$existing_value'].CanonicalHostedZoneId" \
+                  --output text 2>/dev/null || echo "")
+                
+                if [[ -n "$alb_zone_id" && "$alb_zone_id" != "None" ]]; then
+                  cat <<EOF > delete-record.json
           {
               "Comment": "Cleanup $record_type record for $record_name during destroy",
               "Changes": [
@@ -786,32 +790,34 @@ jobs:
                       "ResourceRecordSet": {
                           "Name": "$record_name",
                           "Type": "$record_type",
-                          "TTL": 300,
-                          "ResourceRecords": [
-                              { "Value": "$existing_value" }
-                          ]
+                          "AliasTarget": {
+                              "DNSName": "$existing_value",
+                              "EvaluateTargetHealth": true,
+                              "HostedZoneId": "$alb_zone_id"
+                          }
                       }
                   }
               ]
           }
           EOF
-              
-              aws route53 change-resource-record-sets \
-                --hosted-zone-id "${{ inputs.hosted_zone_id }}" \
-                --change-batch file://delete-record.json || echo "Failed to delete $record_name"
-              
-              rm -f delete-record.json
-              echo "✅ $record_type record deleted: $record_name"
-            else
-              echo "ℹ️  No $record_type record found for: $record_name"
+                  
+                  aws route53 change-resource-record-sets \
+                    --hosted-zone-id "${{ inputs.hosted_zone_id }}" \
+                    --change-batch file://delete-record.json || echo "Failed to delete $record_name"
+                  
+                  rm -f delete-record.json
+                  echo "✅ $record_type record deleted: $record_name"
+                else
+                  echo "⚠️  Could not get ALB zone ID for deletion"
+                fi
+              else
+                echo "ℹ️  No $record_type record found for: $record_name"
+              fi
             fi
           }
           
           # Delete primary domain record
-          delete_dns_record_if_exists "${{ inputs.domain_name }}" "CNAME"
-          
-          # Delete TURN domain record
-          delete_dns_record_if_exists "turn-${{ inputs.domain_name }}" "CNAME"
+          delete_dns_record_if_exists "${{ inputs.domain_name }}" "A"
           
           echo "✅ DNS cleanup completed"
 

@@ -23,9 +23,8 @@ DOMAIN_NAME="${DOMAIN_NAME:-}"
 HOSTED_ZONE_ID="${HOSTED_ZONE_ID:-}"
 
 # --- Derived Variables ---
-# Extract base domain from full domain (e.g., example.com from livekit.example.com)
+# No need for TURN domain - just primary domain
 BASE_DOMAIN=$(echo "$DOMAIN_NAME" | sed 's/^[^.]*\.//')
-TURN_DOMAIN="turn-${DOMAIN_NAME}"
 
 # --- Output Variables ---
 ALB_ENDPOINT_OUTPUT_FILE="${ALB_ENDPOINT_OUTPUT_FILE:-/tmp/alb_endpoint.txt}"
@@ -58,7 +57,6 @@ echo "   Cluster: $CLUSTER_NAME"
 echo "   Region: $AWS_REGION"
 echo "   Environment: $ENVIRONMENT"
 echo "   Primary Domain: $DOMAIN_NAME"
-echo "   TURN Domain: $TURN_DOMAIN"
 echo "   Base Domain: $BASE_DOMAIN"
 echo "   Hosted Zone ID: $HOSTED_ZONE_ID"
 echo ""
@@ -90,12 +88,12 @@ get_alb_endpoint() {
         return 1
     fi
     
-    # Quick check for ALB endpoint
+    # Quick check for ALB endpoint from ingress
     local alb_endpoint=$(kubectl get ingress -n "$namespace" -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
     
     if [[ -n "$alb_endpoint" && "$alb_endpoint" != "null" && "$alb_endpoint" != "" ]]; then
-        # Validate the endpoint format
-        if [[ "$alb_endpoint" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*\.elb\.amazonaws\.com$ ]]; then
+        # Validate the endpoint format and ensure it's a single ALB
+        if [[ "$alb_endpoint" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*\.elb\.[a-zA-Z0-9-]+\.amazonaws\.com$ ]]; then
             echo "✅ Found ALB endpoint: $alb_endpoint"
             echo "$alb_endpoint"
             return 0
@@ -111,17 +109,36 @@ check_existing_record() {
     local record_name="$1"
     local record_type="$2"
     
-    local existing_value=$(aws route53 list-resource-record-sets \
-        --hosted-zone-id "$HOSTED_ZONE_ID" \
-        --query "ResourceRecordSets[?Name=='${record_name}.' && Type=='${record_type}'].ResourceRecords[0].Value" \
-        --output text 2>/dev/null || echo "")
+    echo "🔍 Checking for existing $record_type record: $record_name"
     
-    if [[ -n "$existing_value" && "$existing_value" != "None" ]]; then
-        echo "$existing_value"
-        return 0
+    if [[ "$record_type" == "A" ]]; then
+        # Check for A record (ALIAS)
+        local existing_value=$(aws route53 list-resource-record-sets \
+            --hosted-zone-id "$HOSTED_ZONE_ID" \
+            --query "ResourceRecordSets[?Name=='${record_name}.' && Type=='${record_type}'].AliasTarget.DNSName" \
+            --output text 2>/dev/null || echo "")
+        
+        if [[ -n "$existing_value" && "$existing_value" != "None" ]]; then
+            echo "📋 Found existing A record: $existing_value"
+            echo "$existing_value"
+            return 0
+        fi
     else
-        return 1
+        # Check for CNAME record
+        local existing_value=$(aws route53 list-resource-record-sets \
+            --hosted-zone-id "$HOSTED_ZONE_ID" \
+            --query "ResourceRecordSets[?Name=='${record_name}.' && Type=='${record_type}'].ResourceRecords[0].Value" \
+            --output text 2>/dev/null || echo "")
+        
+        if [[ -n "$existing_value" && "$existing_value" != "None" ]]; then
+            echo "📋 Found existing CNAME record: $existing_value"
+            echo "$existing_value"
+            return 0
+        fi
     fi
+    
+    echo "ℹ️  No existing $record_type record found for $record_name"
+    return 1
 }
 
 # Function to delete existing DNS record
@@ -129,10 +146,34 @@ delete_dns_record() {
     local record_name="$1"
     local record_type="$2"
     local record_value="$3"
+    local alb_zone_id="$4"  # For A records (ALIAS)
     
     echo "🗑️  Deleting existing $record_type record for $record_name..."
     
-    cat <<EOF > delete-record.json
+    if [[ "$record_type" == "A" ]]; then
+        # Delete A record (ALIAS)
+        cat <<EOF > delete-record.json
+{
+    "Comment": "Delete existing $record_type record for $record_name",
+    "Changes": [
+        {
+            "Action": "DELETE",
+            "ResourceRecordSet": {
+                "Name": "$record_name",
+                "Type": "$record_type",
+                "AliasTarget": {
+                    "DNSName": "$record_value",
+                    "EvaluateTargetHealth": true,
+                    "HostedZoneId": "$alb_zone_id"
+                }
+            }
+        }
+    ]
+}
+EOF
+    else
+        # Delete CNAME record
+        cat <<EOF > delete-record.json
 {
     "Comment": "Delete existing $record_type record for $record_name",
     "Changes": [
@@ -150,6 +191,7 @@ delete_dns_record() {
     ]
 }
 EOF
+    fi
 
     aws route53 change-resource-record-sets \
         --hosted-zone-id "$HOSTED_ZONE_ID" \
@@ -161,16 +203,27 @@ EOF
     echo "✅ Existing record deleted"
 }
 
-# Function to create DNS record
-create_dns_record() {
+# Function to create DNS A record (ALIAS) pointing to ALB
+create_dns_a_record() {
     local record_name="$1"
-    local record_type="$2"
-    local record_value="$3"
-    local comment="$4"
+    local alb_dns_name="$2"
+    local comment="$3"
     
-    echo "📝 Creating $record_type record: $record_name -> $record_value"
+    echo "📝 Creating A record (ALIAS): $record_name -> $alb_dns_name"
     
-    cat <<EOF > create-record.json
+    # Get ALB Hosted Zone ID (required for ALIAS records)
+    local alb_zone_id=$(aws elbv2 describe-load-balancers \
+        --query "LoadBalancers[?DNSName=='$alb_dns_name'].CanonicalHostedZoneId" \
+        --output text 2>/dev/null)
+    
+    if [[ -z "$alb_zone_id" || "$alb_zone_id" == "None" ]]; then
+        echo "❌ Could not get ALB Hosted Zone ID for: $alb_dns_name"
+        return 1
+    fi
+    
+    echo "🔍 ALB Hosted Zone ID: $alb_zone_id"
+    
+    cat <<EOF > create-a-record.json
 {
     "Comment": "$comment",
     "Changes": [
@@ -178,11 +231,12 @@ create_dns_record() {
             "Action": "CREATE",
             "ResourceRecordSet": {
                 "Name": "$record_name",
-                "Type": "$record_type",
-                "TTL": 300,
-                "ResourceRecords": [
-                    { "Value": "$record_value" }
-                ]
+                "Type": "A",
+                "AliasTarget": {
+                    "DNSName": "$alb_dns_name",
+                    "EvaluateTargetHealth": true,
+                    "HostedZoneId": "$alb_zone_id"
+                }
             }
         }
     ]
@@ -191,45 +245,50 @@ EOF
 
     local change_id=$(aws route53 change-resource-record-sets \
         --hosted-zone-id "$HOSTED_ZONE_ID" \
-        --change-batch file://create-record.json \
+        --change-batch file://create-a-record.json \
         --query "ChangeInfo.Id" \
         --output text)
     
-    rm -f create-record.json
-    echo "✅ $record_type record created - Change ID: $change_id"
+    rm -f create-a-record.json
+    echo "✅ A record (ALIAS) created - Change ID: $change_id"
     return 0
 }
 
-# Function to manage DNS record (always delete if exists, then create new)
-manage_dns_record() {
+# Function to manage DNS A record (always delete if exists, then create new)
+manage_dns_a_record() {
     local record_name="$1"
-    local record_type="$2"
-    local target_value="$3"
-    local comment="$4"
+    local alb_dns_name="$2"
+    local comment="$3"
     
     echo ""
-    echo "🔧 Managing $record_type record for: $record_name"
-    echo "   Target value: $target_value"
+    echo "🔧 Managing A record (ALIAS) for: $record_name"
+    echo "   Target ALB: $alb_dns_name"
     
-    # Check if record exists
-    if existing_value=$(check_existing_record "$record_name" "$record_type"); then
-        echo "📋 Found existing $record_type record: $existing_value"
-        
+    # Get ALB Hosted Zone ID for both delete and create operations
+    local alb_zone_id=$(aws elbv2 describe-load-balancers \
+        --query "LoadBalancers[?DNSName=='$alb_dns_name'].CanonicalHostedZoneId" \
+        --output text 2>/dev/null)
+    
+    if [[ -z "$alb_zone_id" || "$alb_zone_id" == "None" ]]; then
+        echo "❌ Could not get ALB Hosted Zone ID for: $alb_dns_name"
+        return 1
+    fi
+    
+    # Check if A record exists
+    if existing_value=$(check_existing_record "$record_name" "A"); then
         # ALWAYS delete existing record (even if it matches) to ensure it works properly
-        echo "🔄 Deleting existing record to ensure proper configuration..."
+        echo "🔄 Deleting existing A record to ensure proper configuration..."
         echo "   (This ensures the record works correctly and isn't stale)"
-        delete_dns_record "$record_name" "$record_type" "$existing_value"
+        delete_dns_record "$record_name" "A" "$existing_value" "$alb_zone_id"
         
         # Wait for deletion to propagate
         echo "⏳ Waiting for deletion to propagate..."
         sleep 15
-    else
-        echo "ℹ️  No existing $record_type record found for $record_name"
     fi
     
-    # Always create the new record
-    echo "📝 Creating new $record_type record..."
-    create_dns_record "$record_name" "$record_type" "$target_value" "$comment"
+    # Always create the new A record
+    echo "📝 Creating new A record (ALIAS)..."
+    create_dns_a_record "$record_name" "$alb_dns_name" "$comment"
 }
 
 # Function to get ALB endpoint with simple fallback
@@ -248,23 +307,35 @@ get_alb_endpoint_with_fallback() {
         return 0
     fi
     
-    # Method 3: Try to find ALB by searching AWS
-    echo "🔍 ALB not ready in ingress, searching AWS for existing ALB..."
-    local alb_dns=$(aws elbv2 describe-load-balancers \
-        --query "LoadBalancers[?contains(LoadBalancerName, 'livekit') || contains(LoadBalancerName, '$ENVIRONMENT')].DNSName" \
-        --output text 2>/dev/null | head -1)
+    # Method 3: Find the LATEST LiveKit ALB by creation time
+    echo "🔍 ALB not ready in ingress, searching for latest LiveKit ALB..."
+    local latest_alb=$(aws elbv2 describe-load-balancers \
+        --query "LoadBalancers[?contains(LoadBalancerName, 'livekit')] | sort_by(@, &CreatedTime) | [-1].DNSName" \
+        --output text 2>/dev/null)
     
-    if [[ -n "$alb_dns" && "$alb_dns" != "None" ]]; then
-        echo "✅ Found ALB by search: $alb_dns"
-        ALB_ENDPOINT="$alb_dns"
+    if [[ -n "$latest_alb" && "$latest_alb" != "None" ]]; then
+        echo "✅ Found latest LiveKit ALB: $latest_alb"
+        ALB_ENDPOINT="$latest_alb"
         return 0
     fi
     
-    echo "❌ Could not find ALB endpoint"
+    # Method 4: Find any ALB with 'livekit' in the name
+    echo "🔍 Searching for any LiveKit ALB..."
+    local any_livekit_alb=$(aws elbv2 describe-load-balancers \
+        --query "LoadBalancers[?contains(LoadBalancerName, 'livekit')].DNSName" \
+        --output text 2>/dev/null | head -1)
+    
+    if [[ -n "$any_livekit_alb" && "$any_livekit_alb" != "None" ]]; then
+        echo "✅ Found LiveKit ALB: $any_livekit_alb"
+        ALB_ENDPOINT="$any_livekit_alb"
+        return 0
+    fi
+    
+    echo "❌ Could not find LiveKit ALB endpoint"
     echo "🔧 Please check:"
     echo "   1. LiveKit deployment is complete: kubectl get all -n livekit"
     echo "   2. Ingress is created: kubectl get ingress -n livekit"
-    echo "   3. ALB exists in AWS Console"
+    echo "   3. ALB exists in AWS Console (search for 'livekit')"
     echo "   4. Or provide manual ALB endpoint in pipeline input"
     return 1
 }
@@ -296,7 +367,6 @@ export_alb_endpoint() {
     if [[ -n "$GITHUB_OUTPUT" ]]; then
         echo "alb_endpoint=$alb_endpoint" >> "$GITHUB_OUTPUT"
         echo "primary_domain=$DOMAIN_NAME" >> "$GITHUB_OUTPUT"
-        echo "turn_domain=$TURN_DOMAIN" >> "$GITHUB_OUTPUT"
         echo "📄 DNS information exported to GitHub Actions output"
     fi
 }
@@ -395,46 +465,36 @@ fi
 echo ""
 
 # -----------------------------------------------------------------------------
-# STEP 5: CREATE PRIMARY DOMAIN RECORD
+# STEP 5: CREATE PRIMARY DOMAIN A RECORD
 # -----------------------------------------------------------------------------
 
-echo "📋 Step 5: Create Primary Domain Record"
-echo "======================================="
+echo "📋 Step 5: Create Primary Domain A Record (ALIAS)"
+echo "================================================="
 
-manage_dns_record "$DOMAIN_NAME" "CNAME" "$ALB_ENDPOINT" "LiveKit primary domain - Environment: $ENVIRONMENT"
+manage_dns_a_record "$DOMAIN_NAME" "$ALB_ENDPOINT" "LiveKit primary domain A record (ALIAS) - Environment: $ENVIRONMENT"
 echo ""
 
 # -----------------------------------------------------------------------------
-# STEP 6: CREATE TURN DOMAIN RECORD
+# STEP 6: WAIT FOR DNS PROPAGATION
 # -----------------------------------------------------------------------------
 
-echo "📋 Step 6: Create TURN Domain Record"
-echo "===================================="
-
-manage_dns_record "$TURN_DOMAIN" "CNAME" "$ALB_ENDPOINT" "LiveKit TURN domain - Environment: $ENVIRONMENT"
-echo ""
-
-# -----------------------------------------------------------------------------
-# STEP 7: WAIT FOR DNS PROPAGATION
-# -----------------------------------------------------------------------------
-
-echo "📋 Step 7: Wait for DNS Propagation"
+echo "📋 Step 6: Wait for DNS Propagation"
 echo "==================================="
 
 echo "⏳ Waiting for DNS changes to propagate..."
 echo "   This may take a few minutes..."
 
-# Wait for DNS propagation (shorter wait since we're using CNAME records)
+# Wait for DNS propagation (shorter wait since we're using A records)
 sleep 60
 
 echo "✅ DNS propagation wait completed"
 echo ""
 
 # -----------------------------------------------------------------------------
-# STEP 8: VERIFY DNS RESOLUTION
+# STEP 7: VERIFY DNS RESOLUTION
 # -----------------------------------------------------------------------------
 
-echo "📋 Step 8: Verify DNS Resolution"
+echo "📋 Step 7: Verify DNS Resolution"
 echo "==============================="
 
 echo "🔍 Testing DNS resolution..."
@@ -447,15 +507,6 @@ if nslookup "$DOMAIN_NAME" >/dev/null 2>&1; then
 else
     echo "⚠️  Primary domain DNS resolution pending (may take more time to propagate)"
 fi
-
-# Test TURN domain
-echo "Testing TURN domain: $TURN_DOMAIN"
-if nslookup "$TURN_DOMAIN" >/dev/null 2>&1; then
-    resolved_ip=$(nslookup "$TURN_DOMAIN" | grep -A1 "Name:" | tail -1 | awk '{print $2}' || echo "unknown")
-    echo "✅ TURN domain resolves to: $resolved_ip"
-else
-    echo "⚠️  TURN domain DNS resolution pending (may take more time to propagate)"
-fi
 echo ""
 
 # =============================================================================
@@ -465,23 +516,20 @@ echo ""
 echo "🎉 DNS SETUP COMPLETE"
 echo "===================="
 echo "✅ ALB endpoint retrieved and verified"
-echo "✅ DNS records created and configured"
+echo "✅ DNS A record created and configured"
 echo ""
 echo "📋 DNS Records Summary:"
-echo "   • Primary Domain: $DOMAIN_NAME -> $ALB_ENDPOINT"
-echo "   • TURN Domain: $TURN_DOMAIN -> $ALB_ENDPOINT"
+echo "   • Primary Domain: $DOMAIN_NAME -> $ALB_ENDPOINT (A record/ALIAS)"
 echo "   • Hosted Zone ID: $HOSTED_ZONE_ID"
 echo "   • Environment: $ENVIRONMENT"
 echo ""
 echo "📋 Access Information:"
 echo "   🌐 LiveKit Server: https://$DOMAIN_NAME"
-echo "   🔄 TURN Server: $TURN_DOMAIN"
 echo "   🔗 ALB Endpoint: $ALB_ENDPOINT"
 echo ""
-echo "📋 Next Steps:"
+echo "� NexAt Steps:"
 echo "   1. DNS records may take 5-15 minutes to fully propagate globally"
 echo "   2. Test LiveKit connectivity using the primary domain"
-echo "   3. TURN server will be accessible via the TURN domain"
-echo "   4. Monitor ALB health and LiveKit pod status"
+echo "   3. Monitor ALB health and LiveKit pod status"
 echo ""
 echo "✅ DNS configuration completed at: $(date)"
