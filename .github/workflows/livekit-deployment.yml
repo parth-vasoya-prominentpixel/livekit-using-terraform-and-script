@@ -8,6 +8,7 @@ name: 🎥 LiveKit Deployment Pipeline
 # - skip_load_balancer: Skip AWS Load Balancer Controller installation
 # - skip_livekit: Skip LiveKit application deployment
 # - skip_dns_setup: Skip DNS records creation for domains
+# - skip_sip_server: Skip SIP Server deployment
 
 on:
   workflow_dispatch:
@@ -61,6 +62,11 @@ on:
         type: boolean
       skip_dns_setup:
         description: 'Skip DNS Records Setup'
+        required: false
+        default: false
+        type: boolean
+      skip_sip_server:
+        description: 'Skip SIP Server Deployment'
         required: false
         default: false
         type: boolean
@@ -712,6 +718,129 @@ jobs:
           echo "🔄 TURN Domain: turn-${{ inputs.domain_name }}"
           echo "📄 Full logs available in pipeline output above"
 
+  # Step 8: Deploy SIP Server
+  deploy-sip-server:
+    name: 📞 Step 8 - Deploy SIP Server
+    runs-on: ubuntu-latest
+    needs: [setup-dns-records, deploy-livekit, eks-access-and-acm, terraform-apply]
+    if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_sip_server && ((needs.setup-dns-records.result == 'success') || (inputs.skip_dns_setup && needs.deploy-livekit.result == 'success')) }}
+    environment: livekit-poc-${{ inputs.environment }}-deploy-sip-server
+    
+    steps:
+      - name: 📋 Manual Approval - Deploy SIP Server
+        run: |
+          echo "🤔 Manual approval required to deploy SIP Server"
+          echo ""
+          echo "📋 This step will deploy:"
+          echo "   ✅ SIP ConfigMap with dynamic configuration"
+          echo "   ✅ SIP Server deployment with proper resource limits"
+          echo "   ✅ SIP Service for UDP/TCP connectivity"
+          echo "   ✅ Health checks and monitoring"
+          echo "   ✅ Integration with LiveKit and Redis"
+          echo ""
+          echo "🌍 Environment: ${{ inputs.environment }}"
+          echo "🔗 Domain: ${{ inputs.domain_name }}"
+          echo "📞 SIP Port: 5060"
+          echo "🔄 RTP Port Range: 10000-20000"
+          echo "⏱️ Estimated Time: ~3-5 minutes"
+          echo ""
+          echo "📋 SIP Server Features:"
+          echo "   • WebSocket URL: wss://${{ inputs.domain_name }}"
+          echo "   • Redis integration for clustering"
+          echo "   • Host networking for RTP traffic"
+          echo "   • Health checks and auto-restart"
+          echo "   • Production resource limits"
+          echo ""
+          echo "🔒 Security: This step requires permissions to:"
+          echo "   • Create Kubernetes resources (ConfigMap, Deployment, Service)"
+          echo "   • Access LiveKit namespace"
+          echo ""
+          echo "ℹ️  Note: You can skip this step using 'Skip SIP Server Deployment' option"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          role-session-name: GitHubActions-SIP-Server-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Tools
+        run: |
+          # Install kubectl for Kubernetes operations
+          curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+          
+          # Verify installation
+          echo "✅ Tool versions:"
+          kubectl version --client
+
+      - name: Deploy SIP Server
+        working-directory: scripts
+        run: |
+          chmod +x 05-deploy-sip-server.sh
+          
+          # Determine cluster name and Redis endpoint
+          if [ "${{ inputs.skip_terraform_apply }}" = "true" ]; then
+            CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
+            REDIS_ENDPOINT="lp-ec-redis-use1-${{ inputs.environment }}-redis.x4ncn3.ng.0001.use1.cache.amazonaws.com:6379"
+          else
+            # Try to get from terraform output, fallback to constructed name
+            CLUSTER_NAME="${{ needs.terraform-apply.outputs.cluster-name }}"
+            REDIS_ENDPOINT="${{ needs.terraform-apply.outputs.redis-endpoint }}"
+            if [ -z "$CLUSTER_NAME" ]; then
+              CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
+              echo "⚠️  Using constructed cluster name: $CLUSTER_NAME"
+            fi
+            if [ -z "$REDIS_ENDPOINT" ]; then
+              REDIS_ENDPOINT="lp-ec-redis-use1-${{ inputs.environment }}-redis.x4ncn3.ng.0001.use1.cache.amazonaws.com:6379"
+              echo "⚠️  Using constructed Redis endpoint: $REDIS_ENDPOINT"
+            fi
+          fi
+          
+          echo "📋 Configuration for SIP Server Deployment:"
+          echo "📋 Cluster: $CLUSTER_NAME"
+          echo "📋 Region: ${{ env.AWS_REGION }}"
+          echo "📋 Environment: ${{ inputs.environment }}"
+          echo "📋 Domain: ${{ inputs.domain_name }}"
+          echo "📋 Redis Endpoint: $REDIS_ENDPOINT"
+          echo ""
+          
+          # Validate required variables
+          if [ -z "$CLUSTER_NAME" ]; then
+            echo "❌ CLUSTER_NAME could not be determined"
+            exit 1
+          fi
+          
+          if [ -z "$REDIS_ENDPOINT" ]; then
+            echo "❌ REDIS_ENDPOINT could not be determined"
+            exit 1
+          fi
+          
+          # Enable full logging
+          set -x
+          
+          # Deploy SIP Server with configuration and full logging
+          CLUSTER_NAME="$CLUSTER_NAME" \
+          AWS_REGION="${{ env.AWS_REGION }}" \
+          ENVIRONMENT="${{ inputs.environment }}" \
+          DOMAIN_NAME="${{ inputs.domain_name }}" \
+          REDIS_ENDPOINT="$REDIS_ENDPOINT" \
+          ./05-deploy-sip-server.sh 2>&1 | tee /tmp/sip-server-deployment.log
+          
+          # Show final status
+          echo ""
+          echo "🔍 Final Status Check:"
+          kubectl get all -n livekit -l app=sip-server || echo "No SIP server resources found"
+          
+          echo ""
+          echo "📋 SIP Server Deployment Log Summary:"
+          echo "✅ SIP Server deployment completed"
+          echo "📞 SIP Server: Ready at ${{ inputs.domain_name }}:5060"
+          echo "📄 Full logs available in pipeline output above"
+
   # DESTROY: Remove everything (Optional)
   destroy:
     name: 🗑️ Destroy LiveKit Infrastructure
@@ -725,7 +854,7 @@ jobs:
           echo "🤔 Manual approval required to destroy LiveKit infrastructure"
           echo ""
           echo "⚠️  WARNING: This will permanently delete:"
-          echo "   🗑️  All Kubernetes resources (LiveKit, Load Balancer Controller)"
+          echo "   🗑️  All Kubernetes resources (LiveKit, SIP Server, Load Balancer Controller)"
           echo "   🗑️  EKS cluster and associated resources"
           echo "   🗑️  ElastiCache Redis cluster"
           echo "   🗑️  VPC, subnets, and networking components"
@@ -824,7 +953,30 @@ jobs:
           # Delete primary domain record
           delete_dns_record_if_exists "${{ inputs.domain_name }}" "A"
           
+          # Delete TURN domain record
+          delete_dns_record_if_exists "turn-${{ inputs.domain_name }}" "A"
+          
           echo "✅ DNS cleanup completed"
+
+      - name: 🗑️ Clean up Kubernetes Resources
+        run: |
+          echo "🗑️ Cleaning up Kubernetes resources before infrastructure destruction..."
+          
+          # Update kubeconfig to access the cluster
+          CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
+          aws eks update-kubeconfig --name "$CLUSTER_NAME" --region "${{ env.AWS_REGION }}" || echo "Failed to update kubeconfig"
+          
+          # Delete SIP Server resources
+          echo "🗑️ Cleaning up SIP Server resources..."
+          kubectl delete deployment sip-server -n livekit --ignore-not-found=true || echo "SIP deployment cleanup failed"
+          kubectl delete service sip-server -n livekit --ignore-not-found=true || echo "SIP service cleanup failed"
+          kubectl delete configmap sip-config -n livekit --ignore-not-found=true || echo "SIP configmap cleanup failed"
+          
+          # Delete LiveKit resources
+          echo "🗑️ Cleaning up LiveKit resources..."
+          kubectl delete namespace livekit --ignore-not-found=true || echo "LiveKit namespace cleanup failed"
+          
+          echo "✅ Kubernetes cleanup completed"
 
       - name: 🗑️ Destroy All Infrastructure
         working-directory: resources
