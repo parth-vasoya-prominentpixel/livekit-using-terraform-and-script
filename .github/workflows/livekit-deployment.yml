@@ -9,6 +9,7 @@ name: 🎥 LiveKit Deployment Pipeline
 # - skip_livekit: Skip LiveKit application deployment
 # - skip_dns_setup: Skip DNS records creation for domains
 # - skip_sip_server: Skip SIP Server deployment
+# - skip_kamailio: Skip Kamailio SIP Load Balancer deployment
 
 on:
   workflow_dispatch:
@@ -67,6 +68,11 @@ on:
         type: boolean
       skip_sip_server:
         description: 'Skip SIP Server Deployment'
+        required: false
+        default: false
+        type: boolean
+      skip_kamailio:
+        description: 'Skip Kamailio SIP Load Balancer Deployment'
         required: false
         default: false
         type: boolean
@@ -722,7 +728,7 @@ jobs:
   deploy-sip-server:
     name: 📞 Step 8 - Deploy SIP Server
     runs-on: ubuntu-latest
-    needs: [deploy-livekit, eks-access-and-acm]
+    needs: [ setup-dns-records, deploy-livekit, eks-access-and-acm]
     if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_sip_server && ((needs.deploy-livekit.result == 'success' || inputs.skip_livekit) && (needs.eks-access-and-acm.result == 'success' || inputs.skip_eks_access)) }}
     environment: livekit-poc-${{ inputs.environment }}-deploy-sip-server
     
@@ -816,6 +822,104 @@ jobs:
           echo "📋 SIP Server Deployment Log Summary:"
           echo "✅ SIP Server deployment completed"
           echo "📞 SIP Server: Ready at ${{ inputs.domain_name }}:5060"
+          echo "📄 Full logs available in pipeline output above"
+
+  # Step 9: Deploy Kamailio SIP Load Balancer
+  deploy-kamailio:
+    name: 📞 Step 9 - Deploy Kamailio SIP Load Balancer
+    runs-on: ubuntu-latest
+    needs: [deploy-sip-server, eks-access-and-acm]
+    if: ${{ always() && inputs.action == 'deploy' && !inputs.skip_kamailio && ((needs.deploy-sip-server.result == 'success' || inputs.skip_sip_server) && (needs.eks-access-and-acm.result == 'success' || inputs.skip_eks_access)) }}
+    environment: livekit-poc-${{ inputs.environment }}-deploy-kamailio
+    
+    steps:
+      - name: 📋 Manual Approval - Deploy Kamailio SIP Load Balancer
+        run: |
+          echo "🤔 Manual approval required to deploy Kamailio SIP Load Balancer"
+          echo ""
+          echo "📋 This step will deploy:"
+          echo "   ✅ Kamailio ConfigMap with SIP routing configuration"
+          echo "   ✅ RBAC resources for dispatchers service account"
+          echo "   ✅ Kamailio deployment with dispatchers sidecar"
+          echo "   ✅ AWS Network Load Balancer (NLB) for internet-facing SIP traffic"
+          echo "   ✅ Health checks and monitoring for Kamailio"
+          echo ""
+          echo "🌍 Environment: ${{ inputs.environment }}"
+          echo "📞 SIP Port: 5060 (UDP/TCP)"
+          echo "🔄 Load Balancer: AWS NLB (internet-facing)"
+          echo "⏱️ Estimated Time: ~5-8 minutes"
+          echo ""
+          echo "📋 Kamailio Features:"
+          echo "   • SIP load balancing and routing"
+          echo "   • Automatic backend discovery via dispatchers"
+          echo "   • Failover and health monitoring"
+          echo "   • Internet-facing NLB for Twilio/external SIP traffic"
+          echo "   • UDP and TCP SIP support"
+          echo ""
+          echo "🔒 Security: This step requires permissions to:"
+          echo "   • Create Kubernetes resources (ConfigMap, Deployment, Service, RBAC)"
+          echo "   • Create AWS Network Load Balancer"
+          echo "   • Access LiveKit namespace"
+          echo ""
+          echo "ℹ️  Note: This step requires EKS access and LiveKit namespace to exist"
+          echo "ℹ️  Dependencies: EKS Access & ACM step, SIP Server deployment (or namespace)"
+          echo "ℹ️  You can skip this step using 'Skip Kamailio SIP Load Balancer Deployment' option"
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          role-session-name: GitHubActions-Kamailio-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Tools
+        run: |
+          # Install kubectl for Kubernetes operations
+          curl -LO "https://dl.k8s.io/release/v1.30.0/bin/linux/amd64/kubectl"
+          sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
+          
+          # Verify installation
+          echo "✅ Tool versions:"
+          kubectl version --client
+
+      - name: Deploy Kamailio SIP Load Balancer
+        working-directory: scripts
+        run: |
+          chmod +x 06-deploy-kamailio.sh
+          
+          # Use constructed values since Kamailio runs independently
+          CLUSTER_NAME="lp-eks-livekit-use1-${{ inputs.environment }}"
+          
+          echo "📋 Configuration for Kamailio Deployment:"
+          echo "📋 Cluster: $CLUSTER_NAME"
+          echo "📋 Region: ${{ env.AWS_REGION }}"
+          echo "📋 Environment: ${{ inputs.environment }}"
+          echo "📋 SIP Port: 5060"
+          echo ""
+          
+          # Enable full logging
+          set -x
+          
+          # Deploy Kamailio with configuration and full logging
+          CLUSTER_NAME="$CLUSTER_NAME" \
+          AWS_REGION="${{ env.AWS_REGION }}" \
+          ENVIRONMENT="${{ inputs.environment }}" \
+          ./06-deploy-kamailio.sh 2>&1 | tee /tmp/kamailio-deployment.log
+          
+          # Show final status
+          echo ""
+          echo "🔍 Final Status Check:"
+          kubectl get all -n livekit -l app=kamailio || echo "No Kamailio resources found"
+          kubectl get service kamailio -n livekit || echo "No Kamailio service found"
+          
+          echo ""
+          echo "📋 Kamailio Deployment Log Summary:"
+          echo "✅ Kamailio SIP Load Balancer deployment completed"
+          echo "📞 Kamailio: Ready for SIP load balancing"
+          echo "🌐 NLB: Internet-facing load balancer created"
           echo "📄 Full logs available in pipeline output above"
 
   # DESTROY: Remove everything (Optional)
@@ -948,6 +1052,15 @@ jobs:
           kubectl delete deployment sip-server -n livekit --ignore-not-found=true || echo "SIP deployment cleanup failed"
           kubectl delete service sip-server -n livekit --ignore-not-found=true || echo "SIP service cleanup failed"
           kubectl delete configmap sip-config -n livekit --ignore-not-found=true || echo "SIP configmap cleanup failed"
+          
+          # Delete Kamailio resources
+          echo "🗑️ Cleaning up Kamailio resources..."
+          kubectl delete deployment kamailio -n livekit --ignore-not-found=true || echo "Kamailio deployment cleanup failed"
+          kubectl delete service kamailio -n livekit --ignore-not-found=true || echo "Kamailio service cleanup failed"
+          kubectl delete configmap kamailio-config -n livekit --ignore-not-found=true || echo "Kamailio configmap cleanup failed"
+          kubectl delete rolebinding dispatchers-rolebinding -n livekit --ignore-not-found=true || echo "Kamailio rolebinding cleanup failed"
+          kubectl delete role dispatchers-role -n livekit --ignore-not-found=true || echo "Kamailio role cleanup failed"
+          kubectl delete serviceaccount dispatchers -n livekit --ignore-not-found=true || echo "Kamailio serviceaccount cleanup failed"
           
           # Delete LiveKit resources
           echo "🗑️ Cleaning up LiveKit resources..."
