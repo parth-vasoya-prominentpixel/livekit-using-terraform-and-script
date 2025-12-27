@@ -687,7 +687,7 @@ echo ""
 echo "📋 Step 6: Wait for Deployment to be Ready"
 echo "=========================================="
 
-if wait_for_deployment "kamailio" "$LIVEKIT_NAMESPACE" 300; then
+if wait_for_deployment "kamailio" "$LIVEKIT_NAMESPACE" 120; then
     echo "✅ Kamailio deployment is ready"
 else
     echo "❌ Kamailio deployment failed to become ready"
@@ -743,7 +743,7 @@ if kubectl get service kamailio -n "$LIVEKIT_NAMESPACE" >/dev/null 2>&1; then
             break
         fi
         echo "⏳ Waiting for external IP... (attempt $i/30)"
-        sleep 10
+        sleep 4
     done
     
     if [[ -z "$EXTERNAL_IP" ]]; then
