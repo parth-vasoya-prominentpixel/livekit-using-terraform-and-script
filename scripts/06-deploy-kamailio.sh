@@ -575,8 +575,6 @@ spec:
             - "127.0.0.1"
             - "-p"
             - "9998"
-            - "-v"
-            - "2"
           volumeMounts:
             - name: dispatcher-shared
               mountPath: /etc/kamailio
@@ -589,6 +587,25 @@ spec:
                 - ALL
               add:
                 - NET_BIND_SERVICE
+          # Add health checks for dispatchers
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - test -f /etc/kamailio/dispatcher.list
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - test -f /etc/kamailio/dispatcher.list && test -s /etc/kamailio/dispatcher.list
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
           resources:
             requests:
               cpu: $DISPATCHER_CPU_REQUEST
@@ -895,10 +912,13 @@ echo "🔧 Troubleshooting:"
 echo "   • RBAC Issues: Check dispatcher logs for 'forbidden' errors"
 echo "   • No SIP Servers: Ensure SIP server pods have label 'sip-server=1'"
 echo "   • Dispatcher List: kubectl exec -n $LIVEKIT_NAMESPACE <kamailio-pod> -c kamailio -- cat /etc/kamailio/dispatcher.list"
+echo "   • Dispatcher Logs: kubectl logs -n $LIVEKIT_NAMESPACE <kamailio-pod> -c dispatchers"
+echo "   • Dispatcher Args: kubectl describe pod -n $LIVEKIT_NAMESPACE <kamailio-pod> | grep -A 20 'dispatchers:'"
 echo "   • RBAC Check: kubectl auth can-i get endpointslices --as=system:serviceaccount:$LIVEKIT_NAMESPACE:dispatchers --all-namespaces"
 echo "   • Pod Status: kubectl describe pod -n $LIVEKIT_NAMESPACE -l app=kamailio"
 echo "   • Service Status: kubectl get svc kamailio -n $LIVEKIT_NAMESPACE -o wide"
 echo "   • NLB Status: Check AWS Console for Load Balancer health checks"
+echo "   • SIP Server Discovery: kubectl get pods -n $LIVEKIT_NAMESPACE -l sip-server=1"
 echo ""
 echo "🔍 Health Checks:"
 echo "   • Kamailio Process: kubectl exec -n $LIVEKIT_NAMESPACE <pod> -c kamailio -- ps aux | grep kamailio"
