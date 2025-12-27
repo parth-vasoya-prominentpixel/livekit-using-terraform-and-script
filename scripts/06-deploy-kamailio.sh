@@ -390,13 +390,12 @@ metadata:
   namespace: livekit
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: Role
+kind: ClusterRole
 metadata:
-  name: dispatchers-role
-  namespace: livekit
+  name: dispatchers-clusterrole
 rules:
   - apiGroups: [""]
-    resources:
+    resources: 
       - "pods"
       - "pods/log"
       - "pods/status"
@@ -406,8 +405,9 @@ rules:
       - "secrets"
       - "persistentvolumeclaims"
       - "events"
+      - "nodes"
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-
+  
   - apiGroups: ["apps"]
     resources:
       - "deployments"
@@ -418,43 +418,41 @@ rules:
       - "statefulsets/scale"
       - "daemonsets"
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-
+  
   - apiGroups: ["batch"]
     resources:
       - "jobs"
       - "cronjobs"
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-
+  
   - apiGroups: ["networking.k8s.io"]
     resources:
       - "ingresses"
       - "networkpolicies"
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-
+  
   - apiGroups: ["discovery.k8s.io"]
     resources:
       - "endpointslices"
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-
+  
   - apiGroups: ["autoscaling"]
     resources:
       - "horizontalpodautoscalers"
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
+kind: ClusterRoleBinding
 metadata:
-  name: dispatchers-rolebinding
-  namespace: livekit
+  name: dispatchers-clusterrolebinding
 subjects:
   - kind: ServiceAccount
     name: dispatchers
     namespace: livekit
 roleRef:
-  kind: Role
-  name: dispatchers-role
+  kind: ClusterRole
+  name: dispatchers-clusterrole
   apiGroup: rbac.authorization.k8s.io
-
 EOF
 
 echo "📄 RBAC configuration created at: /tmp/kamailio-rbac.yaml"
