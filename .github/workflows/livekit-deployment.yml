@@ -1058,6 +1058,8 @@ jobs:
           kubectl delete deployment kamailio -n livekit --ignore-not-found=true || echo "Kamailio deployment cleanup failed"
           kubectl delete service kamailio -n livekit --ignore-not-found=true || echo "Kamailio service cleanup failed"
           kubectl delete configmap kamailio-config -n livekit --ignore-not-found=true || echo "Kamailio configmap cleanup failed"
+          kubectl delete clusterrolebinding dispatchers-clusterrolebinding --ignore-not-found=true || echo "Kamailio clusterrolebinding cleanup failed"
+          kubectl delete clusterrole dispatchers-clusterrole --ignore-not-found=true || echo "Kamailio clusterrole cleanup failed"
           kubectl delete rolebinding dispatchers-rolebinding -n livekit --ignore-not-found=true || echo "Kamailio rolebinding cleanup failed"
           kubectl delete role dispatchers-role -n livekit --ignore-not-found=true || echo "Kamailio role cleanup failed"
           kubectl delete serviceaccount dispatchers -n livekit --ignore-not-found=true || echo "Kamailio serviceaccount cleanup failed"

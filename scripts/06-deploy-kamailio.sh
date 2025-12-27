@@ -109,6 +109,8 @@ cleanup_on_failure() {
     kubectl delete configmap kamailio-config -n "$LIVEKIT_NAMESPACE" --ignore-not-found=true
     
     # Delete RBAC if it exists
+    kubectl delete clusterrolebinding dispatchers-clusterrolebinding --ignore-not-found=true
+    kubectl delete clusterrole dispatchers-clusterrole --ignore-not-found=true
     kubectl delete rolebinding dispatchers-rolebinding -n "$LIVEKIT_NAMESPACE" --ignore-not-found=true
     kubectl delete role dispatchers-role -n "$LIVEKIT_NAMESPACE" --ignore-not-found=true
     kubectl delete serviceaccount dispatchers -n "$LIVEKIT_NAMESPACE" --ignore-not-found=true
@@ -385,25 +387,93 @@ kind: ServiceAccount
 metadata:
   name: dispatchers
   namespace: $LIVEKIT_NAMESPACE
+  labels:
+    app: kamailio
+    component: dispatchers
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dispatchers-clusterrole
+  labels:
+    app: kamailio
+    component: dispatchers
+rules:
+  # Core resources for service discovery
+  - apiGroups: [""]
+    resources: ["pods", "services", "endpoints", "nodes"]
+    verbs: ["get", "list", "watch"]
+  # EndpointSlices for modern service discovery
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]
+  # Apps resources for deployment and replicaset information
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  # Networking resources for ingress and network policies
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  # Extensions for backward compatibility
+  - apiGroups: ["extensions"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dispatchers-clusterrolebinding
+  labels:
+    app: kamailio
+    component: dispatchers
+subjects:
+  - kind: ServiceAccount
+    name: dispatchers
+    namespace: $LIVEKIT_NAMESPACE
+roleRef:
+  kind: ClusterRole
+  name: dispatchers-clusterrole
+  apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: dispatchers-role
   namespace: $LIVEKIT_NAMESPACE
+  labels:
+    app: kamailio
+    component: dispatchers
 rules:
+  # Namespace-scoped resources with full access
   - apiGroups: [""]
-    resources: ["pods", "services", "endpoints"]
+    resources: ["pods", "services", "endpoints", "configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Pod logs and exec for debugging
+  - apiGroups: [""]
+    resources: ["pods/log", "pods/exec"]
+    verbs: ["get", "list"]
+  # Events for monitoring and debugging
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch", "create"]
+  # Apps resources in namespace
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
     verbs: ["get", "list", "watch"]
+  # EndpointSlices in namespace
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: dispatchers-rolebinding
   namespace: $LIVEKIT_NAMESPACE
+  labels:
+    app: kamailio
+    component: dispatchers
 subjects:
   - kind: ServiceAccount
     name: dispatchers
@@ -412,6 +482,7 @@ roleRef:
   kind: Role
   name: dispatchers-role
   apiGroup: rbac.authorization.k8s.io
+
 EOF
 
 echo "📄 RBAC configuration created at: /tmp/kamailio-rbac.yaml"
@@ -483,6 +554,18 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
           args:
             - "-set"
             - "sip-server=1"
@@ -492,9 +575,20 @@ spec:
             - "127.0.0.1"
             - "-p"
             - "9998"
+            - "-v"
+            - "2"
           volumeMounts:
             - name: dispatcher-shared
               mountPath: /etc/kamailio
+          securityContext:
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_BIND_SERVICE
           resources:
             requests:
               cpu: $DISPATCHER_CPU_REQUEST
@@ -696,7 +790,7 @@ else
     exit 1
 fi
 
-echo "🔍 Testing Kamailio connectivity..."
+echo "🔍 Testing Kamailio connectivity and RBAC permissions..."
 KAMAILIO_POD=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l app=kamailio -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
 if [[ -n "$KAMAILIO_POD" ]]; then
     echo "📋 Testing connectivity to Kamailio pod: $KAMAILIO_POD"
@@ -714,6 +808,40 @@ if [[ -n "$KAMAILIO_POD" ]]; then
         echo "✅ Dispatcher list is accessible"
     else
         echo "⚠️  Could not read dispatcher list"
+    fi
+    
+    # Check dispatchers container logs for RBAC issues
+    echo "🔍 Checking dispatchers container for RBAC issues..."
+    DISPATCHER_LOGS=$(kubectl logs -n "$LIVEKIT_NAMESPACE" "$KAMAILIO_POD" -c dispatchers --tail=20 2>/dev/null || echo "")
+    if echo "$DISPATCHER_LOGS" | grep -q "forbidden"; then
+        echo "⚠️  RBAC permission issues detected in dispatchers logs:"
+        echo "$DISPATCHER_LOGS" | grep "forbidden" | head -3
+    else
+        echo "✅ No RBAC permission issues detected in recent logs"
+    fi
+    
+    # Test RBAC permissions directly
+    echo "🔍 Testing RBAC permissions..."
+    if kubectl auth can-i get pods --as=system:serviceaccount:$LIVEKIT_NAMESPACE:dispatchers -n "$LIVEKIT_NAMESPACE" >/dev/null 2>&1; then
+        echo "✅ ServiceAccount can access pods in namespace"
+    else
+        echo "⚠️  ServiceAccount cannot access pods in namespace"
+    fi
+    
+    if kubectl auth can-i get endpointslices --as=system:serviceaccount:$LIVEKIT_NAMESPACE:dispatchers --all-namespaces >/dev/null 2>&1; then
+        echo "✅ ServiceAccount can access endpointslices cluster-wide"
+    else
+        echo "⚠️  ServiceAccount cannot access endpointslices cluster-wide"
+    fi
+    
+    # Check if SIP servers are being discovered
+    echo "🔍 Checking SIP server discovery..."
+    SIP_SERVERS=$(kubectl get pods -n "$LIVEKIT_NAMESPACE" -l sip-server=1 --no-headers 2>/dev/null | wc -l || echo "0")
+    if [ "$SIP_SERVERS" -gt 0 ]; then
+        echo "✅ Found $SIP_SERVERS SIP server pod(s) for load balancing"
+        kubectl get pods -n "$LIVEKIT_NAMESPACE" -l sip-server=1 -o wide 2>/dev/null || echo "Could not list SIP servers"
+    else
+        echo "⚠️  No SIP server pods found with label sip-server=1"
     fi
 else
     echo "⚠️  Could not find Kamailio pod for connectivity test"
@@ -762,5 +890,19 @@ echo "   2. Configure your SIP clients to connect via the NLB"
 echo "   3. Monitor Kamailio logs: kubectl logs -n $LIVEKIT_NAMESPACE -l app=kamailio -c kamailio"
 echo "   4. Monitor dispatcher logs: kubectl logs -n $LIVEKIT_NAMESPACE -l app=kamailio -c dispatchers"
 echo "   5. Test SIP connectivity through the load balancer"
+echo ""
+echo "🔧 Troubleshooting:"
+echo "   • RBAC Issues: Check dispatcher logs for 'forbidden' errors"
+echo "   • No SIP Servers: Ensure SIP server pods have label 'sip-server=1'"
+echo "   • Dispatcher List: kubectl exec -n $LIVEKIT_NAMESPACE <kamailio-pod> -c kamailio -- cat /etc/kamailio/dispatcher.list"
+echo "   • RBAC Check: kubectl auth can-i get endpointslices --as=system:serviceaccount:$LIVEKIT_NAMESPACE:dispatchers --all-namespaces"
+echo "   • Pod Status: kubectl describe pod -n $LIVEKIT_NAMESPACE -l app=kamailio"
+echo "   • Service Status: kubectl get svc kamailio -n $LIVEKIT_NAMESPACE -o wide"
+echo "   • NLB Status: Check AWS Console for Load Balancer health checks"
+echo ""
+echo "🔍 Health Checks:"
+echo "   • Kamailio Process: kubectl exec -n $LIVEKIT_NAMESPACE <pod> -c kamailio -- ps aux | grep kamailio"
+echo "   • SIP Port Test: kubectl exec -n $LIVEKIT_NAMESPACE <pod> -c kamailio -- netstat -tulpn | grep :5060"
+echo "   • Dispatcher Connection: kubectl exec -n $LIVEKIT_NAMESPACE <pod> -c kamailio -- netstat -tulpn | grep :9998"
 echo ""
 echo "✅ Kamailio deployment completed at: $(date)"
