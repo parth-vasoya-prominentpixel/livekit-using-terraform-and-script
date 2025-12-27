@@ -184,28 +184,28 @@ metadata:
 data:
   kamailio.cfg: |
     #!KAMAILIO
-    
+
     ####### Global Parameters #########
     debug=2
     log_stderror=yes
     log_facility=LOG_LOCAL0
     children=8
-    
+
     tcp_connection_lifetime=3605
     tcp_max_connections=2048
-    
+
     dns=no
     rev_dns=no
-    
+
     server_header="Server: Kamailio LB"
     user_agent_header="User-Agent: Kamailio"
-    
+
     listen=udp:0.0.0.0:5060
     listen=tcp:0.0.0.0:5060
-    
+
     disable_tcp=no
     enable_sctp=no
-    
+
     ####### Modules Section ########
     loadmodule "tm.so"
     loadmodule "tmx.so"
@@ -219,24 +219,24 @@ data:
     loadmodule "sanity.so"
     loadmodule "dispatcher.so"
     loadmodule "ctl.so"
-    
+
     ####### Module Parameters ########
     # RPC on TCP port 9998 (for dispatchers to connect)
     modparam("ctl", "binrpc", "tcp:127.0.0.1:9998")
-    
+
     modparam("tm", "fr_timer", 30000)
     modparam("tm", "fr_inv_timer", 120000)
-    
+
     modparam("rr", "enable_full_lr", 1)
     modparam("rr", "append_fromtag", 1)
-    
+
     modparam("dispatcher", "list_file", "/etc/kamailio/dispatcher.list")
     modparam("dispatcher", "flags", 2)
     modparam("dispatcher", "ds_ping_method", "OPTIONS")
     modparam("dispatcher", "ds_ping_interval", 60)
     modparam("dispatcher", "ds_probing_mode", 1)
     modparam("dispatcher", "ds_ping_from", "sip:kamailio@localhost")
-    
+
     ####### Routing Logic ########
     request_route {
       xlog("L_INFO", "[$rm] from $si:$sp -> $ru (CID: $ci)\n");
@@ -314,14 +314,14 @@ data:
       
       route(RELAY);
     }
-    
+
     route[RELAY] {
       if (!t_relay()) {
         sl_reply_error();
       }
       exit;
     }
-    
+
     failure_route[BACKEND_FAIL] {
       xlog("L_WARN", "Backend failed: $T_reply_code (CID: $ci)\n");
       
@@ -338,7 +338,7 @@ data:
       
       xlog("L_ERR", "All backends failed (CID: $ci)\n");
     }
-    
+
     onreply_route {
       if (status =~ "^(180|183)$") {
         xlog("L_INFO", "$rs Ringing (CID: $ci)\n");
@@ -348,14 +348,15 @@ data:
         xlog("L_WARN", "$rs $rr from $si\n");
       }
     }
-    
+
     event_route[dispatcher:dst-down] {
       xlog("L_ERR", "Backend DOWN: $rm\n");
     }
-    
+
     event_route[dispatcher:dst-up] {
       xlog("L_NOTICE", "Backend UP: $rm\n");
     }
+
 EOF
 
 echo "📄 Kamailio ConfigMap created at: /tmp/kamailio-configmap.yaml"
@@ -386,98 +387,69 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: dispatchers
-  namespace: $LIVEKIT_NAMESPACE
-  labels:
-    app: kamailio
-    component: dispatchers
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: dispatchers-clusterrole
-  labels:
-    app: kamailio
-    component: dispatchers
-rules:
-  # Core resources for service discovery
-  - apiGroups: [""]
-    resources: ["pods", "services", "endpoints", "nodes"]
-    verbs: ["get", "list", "watch"]
-  # EndpointSlices for modern service discovery
-  - apiGroups: ["discovery.k8s.io"]
-    resources: ["endpointslices"]
-    verbs: ["get", "list", "watch"]
-  # Apps resources for deployment and replicaset information
-  - apiGroups: ["apps"]
-    resources: ["deployments", "replicasets"]
-    verbs: ["get", "list", "watch"]
-  # Networking resources for ingress and network policies
-  - apiGroups: ["networking.k8s.io"]
-    resources: ["ingresses", "networkpolicies"]
-    verbs: ["get", "list", "watch"]
-  # Extensions for backward compatibility
-  - apiGroups: ["extensions"]
-    resources: ["ingresses"]
-    verbs: ["get", "list", "watch"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: dispatchers-clusterrolebinding
-  labels:
-    app: kamailio
-    component: dispatchers
-subjects:
-  - kind: ServiceAccount
-    name: dispatchers
-    namespace: $LIVEKIT_NAMESPACE
-roleRef:
-  kind: ClusterRole
-  name: dispatchers-clusterrole
-  apiGroup: rbac.authorization.k8s.io
+  namespace: livekit
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: dispatchers-role
-  namespace: $LIVEKIT_NAMESPACE
-  labels:
-    app: kamailio
-    component: dispatchers
+  namespace: livekit
 rules:
-  # Namespace-scoped resources with full access
   - apiGroups: [""]
-    resources: ["pods", "services", "endpoints", "configmaps", "secrets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
-  # Pod logs and exec for debugging
-  - apiGroups: [""]
-    resources: ["pods/log", "pods/exec"]
-    verbs: ["get", "list"]
-  # Events for monitoring and debugging
-  - apiGroups: [""]
-    resources: ["events"]
-    verbs: ["get", "list", "watch", "create"]
-  # Apps resources in namespace
+    resources:
+      - "pods"
+      - "pods/log"
+      - "pods/status"
+      - "services"
+      - "endpoints"
+      - "configmaps"
+      - "secrets"
+      - "persistentvolumeclaims"
+      - "events"
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
   - apiGroups: ["apps"]
-    resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
-    verbs: ["get", "list", "watch"]
-  # EndpointSlices in namespace
+    resources:
+      - "deployments"
+      - "deployments/scale"
+      - "replicasets"
+      - "replicasets/scale"
+      - "statefulsets"
+      - "statefulsets/scale"
+      - "daemonsets"
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  - apiGroups: ["batch"]
+    resources:
+      - "jobs"
+      - "cronjobs"
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  - apiGroups: ["networking.k8s.io"]
+    resources:
+      - "ingresses"
+      - "networkpolicies"
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
   - apiGroups: ["discovery.k8s.io"]
-    resources: ["endpointslices"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    resources:
+      - "endpointslices"
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+  - apiGroups: ["autoscaling"]
+    resources:
+      - "horizontalpodautoscalers"
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: dispatchers-rolebinding
-  namespace: $LIVEKIT_NAMESPACE
-  labels:
-    app: kamailio
-    component: dispatchers
+  namespace: livekit
 subjects:
   - kind: ServiceAccount
     name: dispatchers
-    namespace: $LIVEKIT_NAMESPACE
+    namespace: livekit
 roleRef:
   kind: Role
   name: dispatchers-role
@@ -509,11 +481,14 @@ echo "🔄 Creating Kamailio deployment configuration..."
 
 # Create the Deployment YAML
 cat <<EOF > /tmp/kamailio-deployment.yaml
+# ==========================================
+# FIXED kamailio-deployment.yaml
+# ==========================================
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: kamailio
-  namespace: $LIVEKIT_NAMESPACE
+  namespace: livekit
   labels:
     app: kamailio
 spec:
@@ -527,12 +502,14 @@ spec:
         app: kamailio
     spec:
       serviceAccountName: dispatchers
+
       volumes:
         - name: kamailio-config
           configMap:
             name: kamailio-config
         - name: dispatcher-shared
           emptyDir: {}
+
       initContainers:
         - name: init-dispatcher
           image: busybox:latest
@@ -546,26 +523,17 @@ spec:
           volumeMounts:
             - name: dispatcher-shared
               mountPath: /etc/kamailio
+
       containers:
         - name: dispatchers
           image: cycoresystems/dispatchers:latest
+
           env:
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP
-            - name: NODE_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: spec.nodeName
+
           args:
             - "-set"
             - "sip-server=1"
@@ -575,60 +543,38 @@ spec:
             - "127.0.0.1"
             - "-p"
             - "9998"
+
           volumeMounts:
             - name: dispatcher-shared
               mountPath: /etc/kamailio
-          securityContext:
-            runAsNonRoot: false
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: false
-            capabilities:
-              drop:
-                - ALL
-              add:
-                - NET_BIND_SERVICE
-          # Add health checks for dispatchers
-          livenessProbe:
-            exec:
-              command:
-                - sh
-                - -c
-                - test -f /etc/kamailio/dispatcher.list
-            initialDelaySeconds: 30
-            periodSeconds: 30
-            timeoutSeconds: 5
-          readinessProbe:
-            exec:
-              command:
-                - sh
-                - -c
-                - test -f /etc/kamailio/dispatcher.list && test -s /etc/kamailio/dispatcher.list
-            initialDelaySeconds: 10
-            periodSeconds: 10
-            timeoutSeconds: 3
+
           resources:
             requests:
-              cpu: $DISPATCHER_CPU_REQUEST
-              memory: $DISPATCHER_MEMORY_REQUEST
+              cpu: 50m
+              memory: 64Mi
             limits:
-              cpu: $DISPATCHER_CPU_LIMIT
-              memory: $DISPATCHER_MEMORY_LIMIT
+              cpu: 200m
+              memory: 128Mi
+
         - name: kamailio
           image: ghcr.io/kamailio/kamailio:6.0.4-bookworm
+
           volumeMounts:
             - name: kamailio-config
               mountPath: /etc/kamailio/kamailio.cfg
               subPath: kamailio.cfg
             - name: dispatcher-shared
               mountPath: /etc/kamailio
+
           ports:
-            - containerPort: $SIP_PORT
+            - containerPort: 5060
               protocol: UDP
               name: sip-udp
-            - containerPort: $SIP_PORT
+            - containerPort: 5060
               protocol: TCP
               name: sip-tcp
-          # FIXED: Use simple file check instead of ps commands
+
+          # FIXED: Use simple file check instead of ps command
           startupProbe:
             exec:
               command:
@@ -640,27 +586,31 @@ spec:
             timeoutSeconds: 2
             successThreshold: 1
             failureThreshold: 30
+
           # FIXED: Use TCP socket check
           readinessProbe:
             tcpSocket:
-              port: $SIP_PORT
+              port: 5060
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 2
+
           # FIXED: Use TCP socket check
           livenessProbe:
             tcpSocket:
-              port: $SIP_PORT
+              port: 5060
             initialDelaySeconds: 15
             periodSeconds: 10
             timeoutSeconds: 2
+
           resources:
             requests:
-              cpu: $KAMAILIO_CPU_REQUEST
-              memory: $KAMAILIO_MEMORY_REQUEST
+              cpu: 200m
+              memory: 256Mi
             limits:
-              cpu: $KAMAILIO_CPU_LIMIT
-              memory: $KAMAILIO_MEMORY_LIMIT
+              cpu: 1000m
+              memory: 512Mi
+
 EOF
 
 echo "📄 Kamailio Deployment created at: /tmp/kamailio-deployment.yaml"
@@ -692,7 +642,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: kamailio
-  namespace: $LIVEKIT_NAMESPACE
+  namespace: livekit
   annotations:
     # NLB type
     service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
@@ -710,12 +660,12 @@ spec:
   ports:
     - name: sip-udp
       protocol: UDP
-      port: $SIP_PORT
-      targetPort: $SIP_PORT
+      port: 5060
+      targetPort: 5060
     - name: sip-tcp
       protocol: TCP
-      port: $SIP_PORT
-      targetPort: $SIP_PORT
+      port: 5060
+      targetPort: 5060
 EOF
 
 echo "📄 Kamailio NLB Service created at: /tmp/kamailio-service.yaml"
