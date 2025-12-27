@@ -74,6 +74,10 @@ on:
         default: 'Z023244434BR682QISWOZ'
         required: true
         type: string
+      manual_alb_endpoint:
+        description: 'Manual ALB endpoint (optional - for DNS setup fallback)'
+        required: false
+        type: string
 
 env:
   AWS_REGION: us-east-1
@@ -461,8 +465,13 @@ jobs:
           echo ""
           echo "🌍 Environment: ${{ inputs.environment }}"
           echo "🔗 Domain: ${{ inputs.domain_name }}"
-          echo "🔗 Certificate ARN: ${{ needs.eks-access-and-acm.outputs.certificate-arn || 'Auto-detect' }}"
+          echo "🔗 Certificate ARN: ${{ needs.eks-access-and-acm.outputs.certificate-arn || 'Auto-detect by domain' }}"
           echo "⏱️ Estimated Time: ~5-10 minutes"
+          echo ""
+          echo "🔍 Certificate Handling:"
+          echo "   • If certificate ARN provided: Uses specified certificate"
+          echo "   • If certificate ARN missing: Auto-detects by domain name"
+          echo "   • Validates certificate is in ISSUED status"
 
       - name: Checkout code
         uses: actions/checkout@v4
@@ -525,7 +534,8 @@ jobs:
           echo "📋 Redis: $REDIS_ENDPOINT"
           echo "📋 Environment: ${{ inputs.environment }}"
           echo "📋 Domain: ${{ inputs.domain_name }}"
-          echo "📋 Certificate ARN: ${{ needs.eks-access-and-acm.outputs.certificate-arn || 'Auto-detect' }}"
+          echo "📋 Certificate ARN: ${{ needs.eks-access-and-acm.outputs.certificate-arn || 'Auto-detect by domain' }}"
+          echo "📋 Certificate Region: ${{ env.AWS_REGION }}"
           echo ""
           
           # Validate required variables
@@ -549,6 +559,7 @@ jobs:
           ENVIRONMENT="${{ inputs.environment }}" \
           DOMAIN_NAME="${{ inputs.domain_name }}" \
           CERTIFICATE_ARN="${{ needs.eks-access-and-acm.outputs.certificate-arn }}" \
+          CERT_REGION="${{ env.AWS_REGION }}" \
           ./03-deploy-livekit.sh 2>&1 | tee /tmp/livekit-deployment.log
           
           # Show final status
@@ -584,7 +595,7 @@ jobs:
           echo ""
           echo "📋 This step will:"
           echo "   ✅ Wait 5 minutes for ALB to be fully active and stable"
-          echo "   ✅ Retrieve ALB endpoint from LiveKit ingress"
+          echo "   ✅ Retrieve ALB endpoint from LiveKit ingress (with fallback methods)"
           echo "   ✅ Create primary domain record: ${{ inputs.domain_name }}"
           echo "   ✅ Create TURN domain record: turn-${{ inputs.domain_name }}"
           echo "   ✅ Handle existing DNS records properly (delete/recreate)"
@@ -594,10 +605,18 @@ jobs:
           echo "🔗 Primary Domain: ${{ inputs.domain_name }}"
           echo "🔄 TURN Domain: turn-${{ inputs.domain_name }}"
           echo "🏷️  Hosted Zone: ${{ inputs.hosted_zone_id }}"
+          echo "🔗 Manual ALB Endpoint: ${{ inputs.manual_alb_endpoint || 'Auto-detect' }}"
           echo "⏱️ Estimated Time: ~8-10 minutes (includes 5min ALB wait)"
+          echo ""
+          echo "🔍 ALB Detection Methods:"
+          echo "   • Method 1: Get from LiveKit ingress status"
+          echo "   • Method 2: Search ALB by name pattern"
+          echo "   • Method 3: Find recent ALB in region"
+          echo "   • Method 4: Use manual ALB endpoint if provided"
           echo ""
           echo "🔒 Security: This step requires permissions to:"
           echo "   • Read Kubernetes ingress resources"
+          echo "   • List AWS Load Balancers"
           echo "   • Manage Route53 DNS records"
           echo ""
           echo "ℹ️  Note: You can skip this step using 'Skip DNS Records Setup' option"
@@ -652,6 +671,7 @@ jobs:
           echo "📋 Primary Domain: ${{ inputs.domain_name }}"
           echo "📋 TURN Domain: turn-${{ inputs.domain_name }}"
           echo "📋 Hosted Zone ID: ${{ inputs.hosted_zone_id }}"
+          echo "📋 Manual ALB Endpoint: ${{ inputs.manual_alb_endpoint || 'Auto-detect' }}"
           echo ""
           
           # Validate required variables
@@ -669,6 +689,7 @@ jobs:
           ENVIRONMENT="${{ inputs.environment }}" \
           DOMAIN_NAME="${{ inputs.domain_name }}" \
           HOSTED_ZONE_ID="${{ inputs.hosted_zone_id }}" \
+          MANUAL_ALB_ENDPOINT="${{ inputs.manual_alb_endpoint }}" \
           ./04-setup-dns-records.sh 2>&1 | tee /tmp/dns-setup.log
           
           # Read outputs from files if they exist

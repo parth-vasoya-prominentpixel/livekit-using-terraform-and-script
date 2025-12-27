@@ -23,6 +23,7 @@ ENVIRONMENT="${ENVIRONMENT:-dev}"
 # Dynamic configuration from pipeline
 DOMAIN_NAME="${DOMAIN_NAME:-}"
 CERTIFICATE_ARN="${CERTIFICATE_ARN:-}"
+CERT_REGION="${CERT_REGION:-$AWS_REGION}"
 
 # LiveKit configuration
 LIVEKIT_NAMESPACE="livekit"
@@ -44,6 +45,7 @@ echo "   Domain: $LIVEKIT_DOMAIN"
 echo "   TURN Domain: $TURN_DOMAIN"
 echo "   Redis: $REDIS_ENDPOINT"
 echo "   Certificate ARN: $CERTIFICATE_ARN"
+echo "   Certificate Region: $CERT_REGION"
 echo "   API Key: $API_KEY"
 echo ""
 
@@ -64,8 +66,63 @@ if [[ -z "$DOMAIN_NAME" ]]; then
 fi
 
 if [[ -z "$CERTIFICATE_ARN" ]]; then
-    echo "⚠️  CERTIFICATE_ARN not provided - will attempt to auto-detect"
-    echo "   This may cause issues if certificate is not found"
+    echo "⚠️  CERTIFICATE_ARN not provided - attempting to auto-detect by domain"
+    echo "   Searching for existing certificate for domain: $DOMAIN_NAME"
+    
+    # Function to find certificate by domain name
+    find_certificate_by_domain() {
+        local domain="$1"
+        local region="${CERT_REGION:-$AWS_REGION}"
+        
+        echo "🔍 Searching for certificate for domain: $domain in region: $region"
+        
+        # Search for certificate by domain name
+        local cert_arn=$(aws acm list-certificates \
+            --region "$region" \
+            --query "CertificateSummaryList[?DomainName=='$domain'].CertificateArn" \
+            --output text 2>/dev/null || echo "")
+        
+        if [[ -n "$cert_arn" && "$cert_arn" != "None" ]]; then
+            # Check certificate status
+            local cert_status=$(aws acm describe-certificate \
+                --certificate-arn "$cert_arn" \
+                --region "$region" \
+                --query "Certificate.Status" \
+                --output text 2>/dev/null || echo "")
+            
+            if [[ "$cert_status" == "ISSUED" ]]; then
+                echo "✅ Found valid certificate: $cert_arn"
+                echo "$cert_arn"
+                return 0
+            else
+                echo "⚠️  Found certificate but status is: $cert_status"
+                return 1
+            fi
+        else
+            echo "❌ No certificate found for domain: $domain"
+            return 1
+        fi
+    }
+    
+    # Try to find certificate by domain
+    if FOUND_CERT_ARN=$(find_certificate_by_domain "$DOMAIN_NAME"); then
+        CERTIFICATE_ARN="$FOUND_CERT_ARN"
+        echo "✅ Auto-detected certificate ARN: $CERTIFICATE_ARN"
+        echo "✅ Certificate will be used for ALB ingress configuration"
+    else
+        echo "❌ Could not find valid certificate for domain: $DOMAIN_NAME"
+        echo ""
+        echo "🔧 Troubleshooting steps:"
+        echo "   1. Ensure ACM certificate exists for domain: $DOMAIN_NAME"
+        echo "   2. Verify certificate is in ISSUED status"
+        echo "   3. Check certificate is in the correct region: ${CERT_REGION:-$AWS_REGION}"
+        echo "   4. Run the EKS Access & ACM step to create the certificate"
+        echo "   5. Or manually create certificate in AWS Console"
+        echo ""
+        echo "🔍 You can check existing certificates with:"
+        echo "   aws acm list-certificates --region ${CERT_REGION:-$AWS_REGION}"
+        exit 1
+    fi
 fi
 
 # =============================================================================

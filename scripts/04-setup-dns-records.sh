@@ -78,30 +78,31 @@ fi
 # HELPER FUNCTIONS
 # =============================================================================
 
-# Function to get ALB endpoint from LiveKit ingress
+# Function to get ALB endpoint - quick and simple
 get_alb_endpoint() {
     local namespace="livekit"
-    local max_retries=10
-    local retry_count=0
     
-    echo "🔍 Getting ALB endpoint from LiveKit ingress..."
+    echo "🔍 Checking for ALB endpoint from LiveKit ingress..."
     
-    while [ $retry_count -lt $max_retries ]; do
-        # Get the ingress and extract the load balancer hostname
-        local alb_endpoint=$(kubectl get ingress -n "$namespace" -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
-        
-        if [[ -n "$alb_endpoint" && "$alb_endpoint" != "null" ]]; then
+    # Quick check if namespace exists
+    if ! kubectl get namespace "$namespace" >/dev/null 2>&1; then
+        echo "❌ Namespace '$namespace' does not exist"
+        return 1
+    fi
+    
+    # Quick check for ALB endpoint
+    local alb_endpoint=$(kubectl get ingress -n "$namespace" -o jsonpath='{.items[0].status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+    
+    if [[ -n "$alb_endpoint" && "$alb_endpoint" != "null" && "$alb_endpoint" != "" ]]; then
+        # Validate the endpoint format
+        if [[ "$alb_endpoint" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]*\.elb\.amazonaws\.com$ ]]; then
             echo "✅ Found ALB endpoint: $alb_endpoint"
             echo "$alb_endpoint"
             return 0
         fi
-        
-        retry_count=$((retry_count + 1))
-        echo "⏳ Waiting for ALB endpoint... (attempt $retry_count/$max_retries)"
-        sleep 30
-    done
+    fi
     
-    echo "❌ Failed to get ALB endpoint after $max_retries attempts"
+    echo "⚠️  ALB endpoint not ready yet"
     return 1
 }
 
@@ -231,6 +232,58 @@ manage_dns_record() {
     create_dns_record "$record_name" "$record_type" "$target_value" "$comment"
 }
 
+# Function to get ALB endpoint with simple fallback
+get_alb_endpoint_with_fallback() {
+    echo "🔍 Getting ALB endpoint..."
+    
+    # Method 1: Try to get from LiveKit ingress (quick check)
+    if ALB_ENDPOINT=$(get_alb_endpoint); then
+        return 0
+    fi
+    
+    # Method 2: Use manual ALB endpoint if provided
+    if [[ -n "$MANUAL_ALB_ENDPOINT" ]]; then
+        echo "✅ Using manually provided ALB endpoint: $MANUAL_ALB_ENDPOINT"
+        ALB_ENDPOINT="$MANUAL_ALB_ENDPOINT"
+        return 0
+    fi
+    
+    # Method 3: Try to find ALB by searching AWS
+    echo "🔍 ALB not ready in ingress, searching AWS for existing ALB..."
+    local alb_dns=$(aws elbv2 describe-load-balancers \
+        --query "LoadBalancers[?contains(LoadBalancerName, 'livekit') || contains(LoadBalancerName, '$ENVIRONMENT')].DNSName" \
+        --output text 2>/dev/null | head -1)
+    
+    if [[ -n "$alb_dns" && "$alb_dns" != "None" ]]; then
+        echo "✅ Found ALB by search: $alb_dns"
+        ALB_ENDPOINT="$alb_dns"
+        return 0
+    fi
+    
+    echo "❌ Could not find ALB endpoint"
+    echo "🔧 Please check:"
+    echo "   1. LiveKit deployment is complete: kubectl get all -n livekit"
+    echo "   2. Ingress is created: kubectl get ingress -n livekit"
+    echo "   3. ALB exists in AWS Console"
+    echo "   4. Or provide manual ALB endpoint in pipeline input"
+    return 1
+}
+export_alb_endpoint() {
+    local alb_endpoint="$1"
+    
+    # Export to file for other scripts
+    echo "$alb_endpoint" > "$ALB_ENDPOINT_OUTPUT_FILE"
+    echo "📄 ALB endpoint exported to: $ALB_ENDPOINT_OUTPUT_FILE"
+    
+    # Export to GitHub Actions output if available
+    if [[ -n "$GITHUB_OUTPUT" ]]; then
+        echo "alb_endpoint=$alb_endpoint" >> "$GITHUB_OUTPUT"
+        echo "primary_domain=$DOMAIN_NAME" >> "$GITHUB_OUTPUT"
+        echo "turn_domain=$TURN_DOMAIN" >> "$GITHUB_OUTPUT"
+        echo "📄 DNS information exported to GitHub Actions output"
+    fi
+}
+
 # Function to export ALB endpoint for pipeline use
 export_alb_endpoint() {
     local alb_endpoint="$1"
@@ -257,48 +310,77 @@ echo "====================================="
 echo ""
 
 # -----------------------------------------------------------------------------
-# STEP 1: WAIT FOR LOAD BALANCER TO BE READY
+# STEP 1: QUICK ALB ENDPOINT CHECK
 # -----------------------------------------------------------------------------
 
-echo "📋 Step 1: Wait for Load Balancer to be Ready"
-echo "============================================="
+echo "📋 Step 1: Quick ALB Endpoint Check"
+echo "==================================="
 
-echo "⏳ Waiting 5 minutes for ALB to be fully active and stable..."
-echo "   This ensures the load balancer is properly configured and healthy"
+echo "🔍 Checking if ALB endpoint is already available..."
 
-# Show countdown
-for i in {300..1}; do
-    printf "\r⏱️  Waiting: %02d:%02d remaining" $((i/60)) $((i%60))
-    sleep 1
-done
+if get_alb_endpoint_with_fallback; then
+    echo "✅ ALB endpoint is ready: $ALB_ENDPOINT"
+    echo "⚡ Skipping wait period since ALB is already available"
+    SKIP_WAIT=true
+else
+    echo "⚠️  ALB endpoint not ready yet"
+    echo "⏳ Will wait for ALB to be ready before proceeding"
+    SKIP_WAIT=false
+fi
 echo ""
-echo "✅ Wait period completed"
-echo ""
 
 # -----------------------------------------------------------------------------
-# STEP 2: GET ALB ENDPOINT
+# STEP 2: WAIT FOR LOAD BALANCER (if needed)
 # -----------------------------------------------------------------------------
 
-echo "📋 Step 2: Get ALB Endpoint"
-echo "=========================="
+if [[ "$SKIP_WAIT" != "true" ]]; then
+    echo "📋 Step 2: Wait for Load Balancer to be Ready"
+    echo "============================================="
 
-ALB_ENDPOINT=$(get_alb_endpoint)
-if [[ -z "$ALB_ENDPOINT" ]]; then
-    echo "❌ Failed to get ALB endpoint"
-    exit 1
+    echo "⏳ Waiting 5 minutes for ALB to be fully active and stable..."
+    echo "   This ensures the load balancer is properly configured and healthy"
+
+    # Show countdown
+    for i in {300..1}; do
+        printf "\r⏱️  Waiting: %02d:%02d remaining" $((i/60)) $((i%60))
+        sleep 1
+    done
+    echo ""
+    echo "✅ Wait period completed"
+    echo ""
+else
+    echo "📋 Step 2: Wait for Load Balancer (SKIPPED)"
+    echo "=========================================="
+    echo "⚡ ALB is already ready, skipping wait period"
+    echo ""
 fi
 
-echo "✅ ALB Endpoint: $ALB_ENDPOINT"
+# -----------------------------------------------------------------------------
+# STEP 3: GET ALB ENDPOINT (final check)
+# -----------------------------------------------------------------------------
+
+echo "📋 Step 3: Get ALB Endpoint (Final Check)"
+echo "========================================"
+
+if [[ "$SKIP_WAIT" != "true" ]]; then
+    # Try again after waiting
+    if ! get_alb_endpoint_with_fallback; then
+        echo "❌ Failed to get ALB endpoint even after waiting"
+        exit 1
+    fi
+fi
+
+echo "✅ ALB Endpoint confirmed: $ALB_ENDPOINT"
 
 # Export ALB endpoint for pipeline use
 export_alb_endpoint "$ALB_ENDPOINT"
 echo ""
 
 # -----------------------------------------------------------------------------
-# STEP 3: VERIFY ALB IS ACCESSIBLE
+# STEP 4: VERIFY ALB IS ACCESSIBLE
 # -----------------------------------------------------------------------------
 
-echo "📋 Step 3: Verify ALB is Accessible"
+echo "📋 Step 4: Verify ALB is Accessible"
 echo "=================================="
 
 echo "🔍 Testing ALB endpoint accessibility..."
@@ -313,30 +395,30 @@ fi
 echo ""
 
 # -----------------------------------------------------------------------------
-# STEP 4: CREATE PRIMARY DOMAIN RECORD
+# STEP 5: CREATE PRIMARY DOMAIN RECORD
 # -----------------------------------------------------------------------------
 
-echo "📋 Step 4: Create Primary Domain Record"
+echo "📋 Step 5: Create Primary Domain Record"
 echo "======================================="
 
 manage_dns_record "$DOMAIN_NAME" "CNAME" "$ALB_ENDPOINT" "LiveKit primary domain - Environment: $ENVIRONMENT"
 echo ""
 
 # -----------------------------------------------------------------------------
-# STEP 5: CREATE TURN DOMAIN RECORD
+# STEP 6: CREATE TURN DOMAIN RECORD
 # -----------------------------------------------------------------------------
 
-echo "📋 Step 5: Create TURN Domain Record"
+echo "📋 Step 6: Create TURN Domain Record"
 echo "===================================="
 
 manage_dns_record "$TURN_DOMAIN" "CNAME" "$ALB_ENDPOINT" "LiveKit TURN domain - Environment: $ENVIRONMENT"
 echo ""
 
 # -----------------------------------------------------------------------------
-# STEP 6: WAIT FOR DNS PROPAGATION
+# STEP 7: WAIT FOR DNS PROPAGATION
 # -----------------------------------------------------------------------------
 
-echo "📋 Step 6: Wait for DNS Propagation"
+echo "📋 Step 7: Wait for DNS Propagation"
 echo "==================================="
 
 echo "⏳ Waiting for DNS changes to propagate..."
@@ -349,10 +431,10 @@ echo "✅ DNS propagation wait completed"
 echo ""
 
 # -----------------------------------------------------------------------------
-# STEP 7: VERIFY DNS RESOLUTION
+# STEP 8: VERIFY DNS RESOLUTION
 # -----------------------------------------------------------------------------
 
-echo "📋 Step 7: Verify DNS Resolution"
+echo "📋 Step 8: Verify DNS Resolution"
 echo "==============================="
 
 echo "🔍 Testing DNS resolution..."
