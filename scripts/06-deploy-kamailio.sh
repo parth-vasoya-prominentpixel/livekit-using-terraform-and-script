@@ -362,6 +362,9 @@ EOF
 echo "📄 Kamailio ConfigMap created at: /tmp/kamailio-configmap.yaml"
 
 # Apply the ConfigMap
+echo "🔄 Cleaning up existing Kamailio ConfigMap..."
+kubectl delete configmap kamailio-config -n "$LIVEKIT_NAMESPACE" --ignore-not-found=true
+
 echo "🔄 Applying Kamailio ConfigMap..."
 if kubectl apply -f /tmp/kamailio-configmap.yaml; then
     echo "✅ Kamailio ConfigMap applied successfully"
@@ -458,6 +461,13 @@ EOF
 echo "📄 RBAC configuration created at: /tmp/kamailio-rbac.yaml"
 
 # Apply the RBAC
+echo "🔄 Cleaning up existing RBAC configuration..."
+kubectl delete clusterrolebinding dispatchers-clusterrolebinding --ignore-not-found=true
+kubectl delete clusterrole dispatchers-clusterrole --ignore-not-found=true
+kubectl delete rolebinding dispatchers-rolebinding -n "$LIVEKIT_NAMESPACE" --ignore-not-found=true
+kubectl delete role dispatchers-role -n "$LIVEKIT_NAMESPACE" --ignore-not-found=true
+kubectl delete serviceaccount dispatchers -n "$LIVEKIT_NAMESPACE" --ignore-not-found=true
+
 echo "🔄 Applying RBAC configuration..."
 if kubectl apply -f /tmp/kamailio-rbac.yaml; then
     echo "✅ RBAC configuration applied successfully"
@@ -572,15 +582,12 @@ spec:
               protocol: TCP
               name: sip-tcp
 
-          # FIXED: Use simple file check instead of ps command
+          # Use TCP socket check for startup
           startupProbe:
-            exec:
-              command:
-                - sh
-                - -c
-                - test -f /etc/kamailio/dispatcher.list && grep -q "^1 sip:" /etc/kamailio/dispatcher.list
-            initialDelaySeconds: 10
-            periodSeconds: 3
+            tcpSocket:
+              port: $SIP_PORT
+            initialDelaySeconds: 15
+            periodSeconds: 5
             timeoutSeconds: 2
             successThreshold: 1
             failureThreshold: 30
@@ -614,6 +621,9 @@ EOF
 echo "📄 Kamailio Deployment created at: /tmp/kamailio-deployment.yaml"
 
 # Apply the Deployment
+echo "🔄 Cleaning up existing Kamailio Deployment..."
+kubectl delete deployment kamailio -n "$LIVEKIT_NAMESPACE" --ignore-not-found=true
+
 echo "🔄 Applying Kamailio Deployment..."
 if kubectl apply -f /tmp/kamailio-deployment.yaml; then
     echo "✅ Kamailio Deployment applied successfully"
@@ -669,6 +679,9 @@ EOF
 echo "📄 Kamailio NLB Service created at: /tmp/kamailio-service.yaml"
 
 # Apply the Service
+echo "🔄 Cleaning up existing Kamailio NLB Service..."
+kubectl delete service kamailio -n "$LIVEKIT_NAMESPACE" --ignore-not-found=true
+
 echo "🔄 Applying Kamailio NLB Service..."
 if kubectl apply -f /tmp/kamailio-service.yaml; then
     echo "✅ Kamailio NLB Service applied successfully"
