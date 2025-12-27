@@ -194,22 +194,20 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: sip-config
-  namespace: $LIVEKIT_NAMESPACE
-  labels:
-    app: sip-server
-    environment: $ENVIRONMENT
+  namespace: livekit
 data:
   config.yaml: |
-    api_key: $API_KEY
-    api_secret: $API_SECRET
-    ws_url: wss://$DOMAIN_NAME
+    api_key: APIKmrHi78hxpbd
+    api_secret: Y3vpZUiNQyC8DdQevWeIdzfMgmjs5hUycqJA22atniuB
+    ws_url: wss://livekit-eks-tf.digi-telephony.com
     redis:
-      address: $REDIS_ENDPOINT
-    sip_port: $SIP_PORT
-    rtp_port: $RTP_PORT_RANGE
-    use_external_ip: $USE_EXTERNAL_IP
+      address: lp-ec-redis-use1-dev-redis.x4ncn3.ng.0001.use1.cache.amazonaws.com:6379
+    sip_port: 5060
+    rtp_port: 10000-20000
+    use_external_ip: true
     logging:
-      level: $LOG_LEVEL
+      level: debug
+
 EOF
 
 echo "📄 SIP ConfigMap created at: /tmp/sip-config.yaml"
@@ -245,16 +243,18 @@ echo "🔄 Creating SIP deployment configuration..."
 
 # Create the Deployment YAML
 cat <<EOF > /tmp/sip-deployment.yaml
+# sip-deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: sip-server
-  namespace: $LIVEKIT_NAMESPACE
+  namespace: livekit
   labels:
     app: sip-server
-    environment: $ENVIRONMENT
 spec:
-  # HPA will manage replicas, so we don't set replicas here
+  # BEFORE: replicas: 1
+  # NOW: Remove replicas (HPA will manage this)
+  # replicas: 1  <-- REMOVE THIS LINE
   selector:
     matchLabels:
       app: sip-server
@@ -262,8 +262,7 @@ spec:
     metadata:
       labels:
         app: sip-server
-        sip-server: "1"  # Label for dispatchers sidecar to identify SIP pods
-        environment: $ENVIRONMENT
+        sip-server: "1" # Label for dispatchers sidecar to identify SIP pods
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
@@ -274,7 +273,7 @@ spec:
           - --config
           - /config/config.yaml
         ports:
-          - containerPort: $SIP_PORT
+          - containerPort: 5060
             protocol: UDP
             name: sip
           - containerPort: 10000
@@ -287,34 +286,19 @@ spec:
           - name: config-volume
             mountPath: /config
             readOnly: true
+        # BEFORE: Low resource limits
+        # NOW: Increase for production workload
         resources:
           requests:
-            cpu: $CPU_REQUEST
-            memory: $MEMORY_REQUEST
+            cpu: 500m      
+            memory: 1Gi 
           limits:
-            cpu: $CPU_LIMIT
-            memory: $MEMORY_LIMIT
-        # Health checks
-        livenessProbe:
-          tcpSocket:
-            port: $SIP_PORT
-          initialDelaySeconds: 30
-          periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 3
-        readinessProbe:
-          tcpSocket:
-            port: $SIP_PORT
-          initialDelaySeconds: 5
-          periodSeconds: 5
-          timeoutSeconds: 3
-          failureThreshold: 3
+            cpu: 2000m    
+            memory: 2Gi  
       volumes:
         - name: config-volume
           configMap:
             name: sip-config
-      # Restart policy
-      restartPolicy: Always
 EOF
 
 echo "📄 SIP Deployment created at: /tmp/sip-deployment.yaml"
@@ -342,6 +326,30 @@ echo "🔄 Creating SIP service configuration..."
 
 # Create the Service YAML
 cat <<EOF > /tmp/sip-service.yaml
+# sip-service.yaml
+# CHANGE: Deploy this service - dispatchers needs it to discover SIP pods
+apiVersion: v1
+kind: Service
+metadata:
+  name: sip-server
+  namespace: livekit
+spec:
+  selector:
+    app: sip-server
+  ports:
+    # BEFORE: Only TCP was defined
+    # NOW: Add UDP (required for SIP)
+    - name: sip-udp
+      port: 5060
+      targetPort: 5060
+      protocol: UDP
+    - name: sip-tcp
+      port: 5060
+      targetPort: 5060
+      protocol: TCP
+  # NEW: Add clusterIP (dispatchers watches endpoints of this service)
+  type: ClusterIP
+
 apiVersion: v1
 kind: Service
 metadata:
